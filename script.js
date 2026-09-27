@@ -1,18 +1,34 @@
 (() => {
-  const ITEM_TYPES = ['🧸', '🎈', '🍦', '🎁', '🧦', '🪀'];
-  const COUNT_PER_TYPE = 3;
+  const ITEM_ICONS = ['🧸', '🎈', '🍦', '🎁', '🧦', '🪀', '🍪', '🧶', '🪁', '🧩', '🍬', '🚗'];
   const TRAY_SLOTS = 7;
+  const STORAGE_KEY = 'gbs-level';
 
   const shelfEl = document.getElementById('shelf');
   const trayEl = document.getElementById('tray');
   const winOverlay = document.getElementById('winOverlay');
+  const winMessage = document.getElementById('winMessage');
+  const levelNumberEl = document.getElementById('levelNumber');
   const restartBtn = document.getElementById('restartBtn');
-  const playAgainBtn = document.getElementById('playAgainBtn');
+  const nextLevelBtn = document.getElementById('nextLevelBtn');
 
   let shelf = [];
   let tray = [];
   let nextId = 1;
   let drag = null;
+  let currentLevel = loadLevel();
+
+  function loadLevel() {
+    const saved = Number(localStorage.getItem(STORAGE_KEY));
+    return Number.isInteger(saved) && saved > 0 ? saved : 1;
+  }
+
+  function saveLevel(level) {
+    try {
+      localStorage.setItem(STORAGE_KEY, String(level));
+    } catch (e) {
+      // storage unavailable (private mode, quota) — progress just won't persist
+    }
+  }
 
   function shuffle(arr) {
     for (let i = arr.length - 1; i > 0; i--) {
@@ -22,12 +38,29 @@
     return arr;
   }
 
-  function newLevel() {
+  // Difficulty ramps by widening the type variety first, then adding a
+  // second (and third...) set of each type once variety hits the icon cap.
+  function levelConfig(level) {
+    const types = Math.min(3 + Math.floor((level - 1) / 2), ITEM_ICONS.length);
+    const setsPerType = 1 + Math.floor((level - 1) / (2 * ITEM_ICONS.length));
+    return { types, setsPerType };
+  }
+
+  function buildShelfPool(level) {
+    const { types, setsPerType } = levelConfig(level);
     const pool = [];
-    ITEM_TYPES.forEach((type) => {
-      for (let i = 0; i < COUNT_PER_TYPE; i++) pool.push(type);
-    });
-    shuffle(pool);
+    for (let t = 0; t < types; t++) {
+      for (let s = 0; s < setsPerType * 3; s++) pool.push(ITEM_ICONS[t]);
+    }
+    return shuffle(pool);
+  }
+
+  function newLevel(level) {
+    currentLevel = level;
+    saveLevel(level);
+    levelNumberEl.textContent = String(level);
+
+    const pool = buildShelfPool(level);
     shelf = pool.map((type) => ({ id: nextId++, type }));
     tray = new Array(TRAY_SLOTS).fill(null);
     winOverlay.classList.add('hidden');
@@ -173,12 +206,13 @@
     const shelfEmpty = shelf.every((c) => c === null);
     const trayEmpty = tray.every((c) => c === null);
     if (shelfEmpty && trayEmpty) {
+      winMessage.textContent = `Level ${currentLevel} complete ✨`;
       winOverlay.classList.remove('hidden');
     }
   }
 
-  restartBtn.addEventListener('click', newLevel);
-  playAgainBtn.addEventListener('click', newLevel);
+  restartBtn.addEventListener('click', () => newLevel(currentLevel));
+  nextLevelBtn.addEventListener('click', () => newLevel(currentLevel + 1));
 
-  newLevel();
+  newLevel(currentLevel);
 })();

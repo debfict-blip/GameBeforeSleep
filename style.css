@@ -42,10 +42,20 @@ body {
 }
 
 .title {
-  font-size: 18px;
+  font-size: 15px;
   font-weight: 600;
   letter-spacing: 0.02em;
-  opacity: 0.9;
+  opacity: 0.75;
+}
+
+.levelPill {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  padding: 9px 14px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--accent);
 }
 
 .iconBtn {
