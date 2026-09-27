@@ -10,9 +10,14 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
 <link rel="icon" href="icons/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<div class="ambient-glow" aria-hidden="true"></div>
+<div id="fxLayer" aria-hidden="true"></div>
 <div id="app">
   <header class="topbar">
     <span class="levelPill">Lv. <span id="levelNumber">1</span></span>
@@ -26,8 +31,14 @@
   </div>
 
   <main class="board">
-    <section id="shelf" class="shelf"></section>
-    <section id="tray" class="tray"></section>
+    <div class="boardSection">
+      <span class="sectionLabel">Aisle Shelf</span>
+      <section id="shelf" class="shelf"></section>
+    </div>
+    <div class="boardSection">
+      <span class="sectionLabel">Sorting Rack</span>
+      <section id="tray" class="tray"></section>
+    </div>
   </main>
 
   <div class="powerBar">

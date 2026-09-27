@@ -1,5 +1,5 @@
 (() => {
-  const ITEM_ICONS = ['🧸', '🎈', '🍦', '🎁', '🧦', '🪀', '🍪', '🧶', '🪁', '🧩', '🍬', '🚗'];
+  const ITEM_ICONS = ['🍎', '🥐', '🧀', '🥛', '🍫', '🥕', '🧃', '🍞', '🥚', '🍯', '🧻', '🥫'];
   const TRAY_SLOTS = 7;
   const HISTORY_LIMIT = 20;
   const START_HAMMERS = 2;
@@ -25,6 +25,7 @@
   const undoBtn = document.getElementById('undoBtn');
   const restartBtn = document.getElementById('restartBtn');
   const nextLevelBtn = document.getElementById('nextLevelBtn');
+  const fxLayer = document.getElementById('fxLayer');
 
   let shelf = [];
   let tray = [];
@@ -125,6 +126,58 @@
     return cell && cell.group !== null && lockedGroups[cell.group] !== undefined;
   }
 
+  // FLIP-style motion: capture each item's on-screen position before a
+  // state change, then after re-rendering, animate from the old position
+  // to the new one so items glide instead of snapping.
+  function captureRects() {
+    const map = new Map();
+    document.querySelectorAll('.item[data-id]').forEach((el) => {
+      map.set(el.dataset.id, el.getBoundingClientRect());
+    });
+    return map;
+  }
+
+  function applyFlip(oldRects) {
+    if (!oldRects) return;
+    document.querySelectorAll('.item[data-id]').forEach((el) => {
+      const old = oldRects.get(el.dataset.id);
+      if (!old) return;
+      const newRect = el.getBoundingClientRect();
+      const dx = old.left - newRect.left;
+      const dy = old.top - newRect.top;
+      if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;
+      el.style.transition = 'none';
+      el.style.transform = `translate(${dx}px, ${dy}px)`;
+      requestAnimationFrame(() => {
+        el.style.transition = 'transform 220ms ease';
+        el.style.transform = '';
+      });
+    });
+  }
+
+  function spawnPopGhost(rect, emoji) {
+    if (!rect) return;
+    const el = document.createElement('div');
+    el.className = 'pop-ghost';
+    el.textContent = emoji;
+    el.style.left = rect.left + 'px';
+    el.style.top = rect.top + 'px';
+    el.style.width = rect.width + 'px';
+    el.style.height = rect.height + 'px';
+    fxLayer.appendChild(el);
+    setTimeout(() => el.remove(), 400);
+  }
+
+  function spawnStarFloat(x, y) {
+    const el = document.createElement('div');
+    el.className = 'star-float';
+    el.textContent = '+1⭐';
+    el.style.left = x + 'px';
+    el.style.top = y + 'px';
+    fxLayer.appendChild(el);
+    setTimeout(() => el.remove(), 750);
+  }
+
   function render() {
     shelfEl.innerHTML = '';
     shelf.forEach((cell, index) => {
@@ -177,6 +230,12 @@
       save(KEYS.stars, stars);
       delete lockedGroups[group];
       render();
+      shelf.forEach((cell) => {
+        if (cell && cell.group === group) {
+          const revealed = shelfEl.querySelector(`[data-id="${cell.id}"]`);
+          if (revealed) revealed.classList.add('reveal-pop');
+        }
+      });
     } else if (el) {
       el.classList.add('shake');
       setTimeout(() => el.classList.remove('shake'), 320);
@@ -193,6 +252,8 @@
 
     if (hammerActive) {
       e.preventDefault();
+      const oldRects = captureRects();
+      const rect = el.getBoundingClientRect();
       pushHistory();
       if (zone === 'shelf') shelf[index] = null;
       else tray[index] = null;
@@ -202,6 +263,8 @@
       resolveTriples();
       checkWin();
       render();
+      applyFlip(oldRects);
+      spawnPopGhost(rect, cell.type);
       return;
     }
 
@@ -239,6 +302,7 @@
   function onPointerUp(e) {
     if (!drag || e.pointerId !== drag.pointerId) return;
 
+    const oldRects = captureRects();
     const dropTarget = document.elementFromPoint(e.clientX, e.clientY);
     const slotEl = dropTarget && dropTarget.closest('.slot');
     if (slotEl) {
@@ -247,7 +311,7 @@
       attemptMove(drag.sourceZone, drag.sourceIndex, targetZone, targetIndex);
     }
 
-    endDrag();
+    endDrag(oldRects);
   }
 
   function onPointerCancel(e) {
@@ -255,7 +319,7 @@
     endDrag();
   }
 
-  function endDrag() {
+  function endDrag(oldRects) {
     drag.ghost.remove();
     drag.el.classList.remove('dragging-source');
     window.removeEventListener('pointermove', onPointerMove);
@@ -263,6 +327,7 @@
     window.removeEventListener('pointercancel', onPointerCancel);
     drag = null;
     render();
+    applyFlip(oldRects);
   }
 
   function pushHistory() {
@@ -305,10 +370,19 @@
       for (let i = 0; i <= tray.length - 3; i++) {
         const a = tray[i], b = tray[i + 1], c = tray[i + 2];
         if (a && b && c && a.type === b.type && c.type === b.type) {
+          // Grab the slot rects before rendering wipes this frame's DOM, so
+          // the clear pop appears exactly where the trio was sitting.
+          const rects = [i, i + 1, i + 2].map((idx) => {
+            const slotEl = trayEl.children[idx];
+            return slotEl ? slotEl.getBoundingClientRect() : null;
+          });
           tray[i] = tray[i + 1] = tray[i + 2] = null;
           cleared = true;
           stars += 1;
           save(KEYS.stars, stars);
+          rects.forEach((rect) => spawnPopGhost(rect, a.type));
+          const midRect = rects[1] || rects[0] || rects[2];
+          if (midRect) spawnStarFloat(midRect.left + midRect.width / 2, midRect.top);
           break;
         }
       }
@@ -317,6 +391,7 @@
 
   function undo() {
     if (undos <= 0 || history.length === 0) return;
+    const oldRects = captureRects();
     const prev = history.pop();
     shelf = prev.shelf;
     tray = prev.tray;
@@ -324,6 +399,7 @@
     undos -= 1;
     save(KEYS.undos, undos);
     render();
+    applyFlip(oldRects);
   }
 
   function toggleHammer() {
