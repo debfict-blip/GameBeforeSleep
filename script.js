@@ -1,6 +1,6 @@
 (() => {
   const ITEM_ICONS = ['🍎', '🥐', '🧀', '🥛', '🍫', '🥕', '🧃', '🍞', '🥚', '🍯', '🧻', '🥫'];
-  const TRAY_SLOTS = 7;
+  const COLS = 6; // must match .shelf's grid-template-columns in style.css
   const HISTORY_LIMIT = 20;
   const START_HAMMERS = 2;
   const START_UNDOS = 2;
@@ -13,7 +13,6 @@
   };
 
   const shelfEl = document.getElementById('shelf');
-  const trayEl = document.getElementById('tray');
   const winOverlay = document.getElementById('winOverlay');
   const winMessage = document.getElementById('winMessage');
   const levelNumberEl = document.getElementById('levelNumber');
@@ -27,8 +26,7 @@
   const nextLevelBtn = document.getElementById('nextLevelBtn');
   const fxLayer = document.getElementById('fxLayer');
 
-  let shelf = [];
-  let tray = [];
+  let shelf = []; // single unified board: item cells and `null` (empty) slots
   let lockedGroups = {}; // groupId -> star cost remaining to unlock
   let nextId = 1;
   let drag = null;
@@ -69,16 +67,24 @@
   // A few of the rarest types start locked behind a star cost, but at least
   // two types are always left unlocked so a level can always earn enough
   // stars, from its own clears alone, to pay for the rest.
+  //
+  // `slack` is the number of empty slots scattered in among the items: the
+  // board holds exactly items.length + slack cells, and a move can only
+  // drop an item into one of those empty cells (never swap two occupied
+  // ones). Fewer empty cells means more shuffling to free up the spot you
+  // actually need, so slack is the main difficulty knob and tapers down
+  // as levels rise — floored above 1 so it stays a puzzle, not a chore.
   function levelConfig(level) {
     const types = Math.min(3 + Math.floor((level - 1) / 2), ITEM_ICONS.length);
     const setsPerType = 1 + Math.floor((level - 1) / (2 * ITEM_ICONS.length));
     const maxLocked = Math.max(0, types - 2);
     const lockedCount = level >= 3 ? Math.min(1 + Math.floor((level - 3) / 4), maxLocked) : 0;
-    return { types, setsPerType, lockedCount };
+    const slack = Math.max(2, 6 - Math.floor((level - 1) / 3));
+    return { types, setsPerType, lockedCount, slack };
   }
 
   function buildShelfPool(level) {
-    const { types, setsPerType, lockedCount } = levelConfig(level);
+    const { types, setsPerType, lockedCount, slack } = levelConfig(level);
     const pool = [];
     for (let t = 0; t < types; t++) {
       const locked = t >= types - lockedCount;
@@ -88,6 +94,7 @@
         pool.push({ type: ITEM_ICONS[t], group: locked ? t : null, cost });
       }
     }
+    for (let k = 0; k < slack; k++) pool.push(null); // empty slots, scattered in by the shuffle below
     return shuffle(pool);
   }
 
@@ -97,17 +104,18 @@
     levelNumberEl.textContent = String(level);
 
     const pool = buildShelfPool(level);
-    shelf = pool.map((p) => ({ id: nextId++, type: p.type, group: p.group }));
+    shelf = pool.map((p) => (p ? { id: nextId++, type: p.type, group: p.group } : null));
     lockedGroups = {};
     pool.forEach((p) => {
-      if (p.group !== null) lockedGroups[p.group] = p.cost;
+      if (p && p.group !== null) lockedGroups[p.group] = p.cost;
     });
 
-    tray = new Array(TRAY_SLOTS).fill(null);
     moves = 0;
     history = [];
     hammerActive = false;
     winOverlay.classList.add('hidden');
+    render(); // lay out real slot elements first, so resolveTriples can read their rects
+    resolveTriples(); // a fresh shuffle can spawn a triple by pure chance; clear it up front
     updateHud();
     render();
   }
@@ -183,32 +191,19 @@
     shelf.forEach((cell, index) => {
       const slot = document.createElement('div');
       slot.className = 'slot';
-      slot.dataset.zone = 'shelf';
       slot.dataset.index = String(index);
       if (cell) {
-        slot.appendChild(isLocked(cell) ? makeLockedEl(cell, index) : makeItemEl(cell, 'shelf', index));
+        slot.appendChild(isLocked(cell) ? makeLockedEl(cell, index) : makeItemEl(cell, index));
       }
       shelfEl.appendChild(slot);
     });
-
-    trayEl.innerHTML = '';
-    tray.forEach((cell, index) => {
-      const slot = document.createElement('div');
-      slot.className = 'slot';
-      slot.dataset.zone = 'tray';
-      slot.dataset.index = String(index);
-      if (cell) slot.appendChild(makeItemEl(cell, 'tray', index));
-      trayEl.appendChild(slot);
-    });
-
     updateHud();
   }
 
-  function makeItemEl(cell, zone, index) {
+  function makeItemEl(cell, index) {
     const el = document.createElement('div');
     el.className = 'item';
     el.textContent = cell.type;
-    el.dataset.zone = zone;
     el.dataset.index = String(index);
     el.dataset.id = String(cell.id);
     el.addEventListener('pointerdown', onPointerDown);
@@ -245,9 +240,8 @@
   function onPointerDown(e) {
     if (drag) return;
     const el = e.currentTarget;
-    const zone = el.dataset.zone;
     const index = Number(el.dataset.index);
-    const cell = zone === 'shelf' ? shelf[index] : tray[index];
+    const cell = shelf[index];
     if (!cell) return;
 
     if (hammerActive) {
@@ -255,8 +249,7 @@
       const oldRects = captureRects();
       const rect = el.getBoundingClientRect();
       pushHistory();
-      if (zone === 'shelf') shelf[index] = null;
-      else tray[index] = null;
+      shelf[index] = null;
       hammers -= 1;
       hammerActive = false;
       save(KEYS.hammers, hammers);
@@ -282,7 +275,6 @@
 
     drag = {
       pointerId: e.pointerId,
-      sourceZone: zone,
       sourceIndex: index,
       el,
       ghost,
@@ -306,9 +298,8 @@
     const dropTarget = document.elementFromPoint(e.clientX, e.clientY);
     const slotEl = dropTarget && dropTarget.closest('.slot');
     if (slotEl) {
-      const targetZone = slotEl.dataset.zone;
       const targetIndex = Number(slotEl.dataset.index);
-      attemptMove(drag.sourceZone, drag.sourceIndex, targetZone, targetIndex);
+      attemptMove(drag.sourceIndex, targetIndex);
     }
 
     endDrag(oldRects);
@@ -333,30 +324,21 @@
   function pushHistory() {
     history.push({
       shelf: shelf.map((c) => (c ? { ...c } : null)),
-      tray: tray.map((c) => (c ? { ...c } : null)),
       moves,
     });
     if (history.length > HISTORY_LIMIT) history.shift();
   }
 
-  function attemptMove(sourceZone, sourceIndex, targetZone, targetIndex) {
-    if (targetZone === 'shelf') return; // items never move back onto the shelf
+  // A move only ever drops an item into an empty (and unlocked) cell —
+  // never a direct swap with an occupied one. That scarcity of empty
+  // cells is the whole puzzle: freeing up the one you need takes planning.
+  function attemptMove(sourceIndex, targetIndex) {
+    if (sourceIndex === targetIndex) return;
+    if (shelf[targetIndex]) return; // target must be empty (also blocks locked cells)
 
-    if (sourceZone === 'shelf') {
-      if (sourceZone === targetZone && sourceIndex === targetIndex) return;
-      if (tray[targetIndex]) return; // shelf items only land in an empty tray slot
-      pushHistory();
-      tray[targetIndex] = shelf[sourceIndex];
-      shelf[sourceIndex] = null;
-    } else if (sourceZone === 'tray') {
-      if (sourceIndex === targetIndex) return;
-      pushHistory();
-      const temp = tray[targetIndex];
-      tray[targetIndex] = tray[sourceIndex];
-      tray[sourceIndex] = temp; // swap; moving into a hole leaves target's old spot empty
-    } else {
-      return;
-    }
+    pushHistory();
+    shelf[targetIndex] = shelf[sourceIndex];
+    shelf[sourceIndex] = null;
 
     moves += 1;
     resolveTriples();
@@ -364,26 +346,29 @@
   }
 
   function resolveTriples() {
-    let cleared = true;
-    while (cleared) {
-      cleared = false;
-      for (let i = 0; i <= tray.length - 3; i++) {
-        const a = tray[i], b = tray[i + 1], c = tray[i + 2];
-        if (a && b && c && a.type === b.type && c.type === b.type) {
-          // Grab the slot rects before rendering wipes this frame's DOM, so
-          // the clear pop appears exactly where the trio was sitting.
-          const rects = [i, i + 1, i + 2].map((idx) => {
-            const slotEl = trayEl.children[idx];
-            return slotEl ? slotEl.getBoundingClientRect() : null;
-          });
-          tray[i] = tray[i + 1] = tray[i + 2] = null;
-          cleared = true;
-          stars += 1;
-          save(KEYS.stars, stars);
-          rects.forEach((rect) => spawnPopGhost(rect, a.type));
-          const midRect = rects[1] || rects[0] || rects[2];
-          if (midRect) spawnStarFloat(midRect.left + midRect.width / 2, midRect.top);
-          break;
+    let clearedAny = true;
+    while (clearedAny) {
+      clearedAny = false;
+      for (let rowStart = 0; rowStart < shelf.length && !clearedAny; rowStart += COLS) {
+        const rowEnd = Math.min(rowStart + COLS, shelf.length);
+        for (let i = rowStart; i <= rowEnd - 3; i++) {
+          const a = shelf[i], b = shelf[i + 1], c = shelf[i + 2];
+          if (a && b && c && a.type === b.type && c.type === b.type) {
+            // Grab the slot rects before rendering wipes this frame's DOM, so
+            // the clear pop appears exactly where the trio was sitting.
+            const rects = [i, i + 1, i + 2].map((idx) => {
+              const slotEl = shelfEl.children[idx];
+              return slotEl ? slotEl.getBoundingClientRect() : null;
+            });
+            shelf[i] = shelf[i + 1] = shelf[i + 2] = null;
+            clearedAny = true;
+            stars += 1;
+            save(KEYS.stars, stars);
+            rects.forEach((rect) => spawnPopGhost(rect, a.type));
+            const midRect = rects[1] || rects[0] || rects[2];
+            if (midRect) spawnStarFloat(midRect.left + midRect.width / 2, midRect.top);
+            break;
+          }
         }
       }
     }
@@ -394,7 +379,6 @@
     const oldRects = captureRects();
     const prev = history.pop();
     shelf = prev.shelf;
-    tray = prev.tray;
     moves = prev.moves;
     undos -= 1;
     save(KEYS.undos, undos);
@@ -409,9 +393,7 @@
   }
 
   function checkWin() {
-    const shelfEmpty = shelf.every((c) => c === null);
-    const trayEmpty = tray.every((c) => c === null);
-    if (shelfEmpty && trayEmpty) {
+    if (shelf.every((c) => c === null)) {
       hammers += 1;
       undos += 1;
       save(KEYS.hammers, hammers);
