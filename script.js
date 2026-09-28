@@ -207,7 +207,8 @@
         slots.push({
           baseX: s * BELT_SPACING,
           item: p ? { id: nextId++, type: p.type, group: p.group } : null,
-          el: null,
+          slotEl: null,
+          itemEl: null,
         });
       }
       result.push({ speed: beltSpeed, offset: 0, trackEl: null, items: slots });
@@ -259,9 +260,18 @@
       const track = document.createElement('div');
       track.className = 'beltTrack';
       belt.trackEl = track;
+      // Every slot gets a moving wrapper — occupied or not — so an empty
+      // slot is itself a visible, catchable-up-with drop target as it
+      // scrolls past, not just dead space between items.
       belt.items.forEach((slot, slotIndex) => {
-        if (slot.item) slot.el = makeBeltItemEl(slot.item, beltIndex, slotIndex);
-        if (slot.el) track.appendChild(slot.el);
+        const slotEl = document.createElement('div');
+        slotEl.className = 'beltSlot';
+        slotEl.dataset.beltIndex = String(beltIndex);
+        slotEl.dataset.slotIndex = String(slotIndex);
+        slot.slotEl = slotEl;
+        slot.itemEl = slot.item ? makeBeltItemEl(slot.item, beltIndex, slotIndex) : null;
+        if (slot.itemEl) slotEl.appendChild(slot.itemEl);
+        track.appendChild(slotEl);
       });
       beltsSectionEl.appendChild(track);
     });
@@ -287,19 +297,20 @@
       const dt = (ts - beltLastTs) / 1000;
       beltLastTs = ts;
 
-      belts.forEach((belt) => {
+      belts.forEach((belt, beltIndex) => {
         belt.offset += belt.speed * dt;
         const trackLength = ITEMS_PER_BELT * BELT_SPACING;
         belt.items.forEach((slot, idx) => {
-          if (!slot.item || !slot.el) return;
-          // Skip the slot currently being dragged — its ghost represents it now.
-          if (drag && drag.source === 'belt' && drag.beltIndex === belts.indexOf(belt) && drag.slotIndex === idx) return;
+          if (!slot.slotEl) return;
+          // Freeze the slot currently being dragged (from OR to) — its
+          // ghost, or the target highlight, represents it while it moves.
+          if (drag && drag.source === 'belt' && drag.beltIndex === beltIndex && drag.slotIndex === idx) return;
           let x = slot.baseX - belt.offset;
           if (x < -BELT_ITEM_SIZE) {
             slot.baseX += trackLength;
             x = slot.baseX - belt.offset;
           }
-          slot.el.style.transform = `translateX(${x}px)`;
+          slot.slotEl.style.transform = `translateX(${x}px)`;
         });
       });
 
@@ -356,7 +367,7 @@
       return slotEl ? slotEl.getBoundingClientRect() : null;
     }
     const slot = belts[loc.beltIndex].items[loc.slotIndex];
-    return slot.el ? slot.el.getBoundingClientRect() : null;
+    return slot.itemEl ? slot.itemEl.getBoundingClientRect() : null;
   }
 
   function removeAtLocation(loc) {
@@ -364,9 +375,9 @@
       shelf[loc.cellIndex].splice(loc.depthIndex, 1);
     } else {
       const slot = belts[loc.beltIndex].items[loc.slotIndex];
-      if (slot.el) slot.el.remove();
+      if (slot.itemEl) slot.itemEl.remove();
       slot.item = null;
-      slot.el = null;
+      slot.itemEl = null;
     }
   }
 
@@ -569,11 +580,17 @@
 
     const oldRects = captureRects();
     const dropTarget = document.elementFromPoint(e.clientX, e.clientY);
-    const slotEl = dropTarget && dropTarget.closest('.shelf .slot');
-    if (slotEl) {
-      const targetIndex = Number(slotEl.dataset.index);
+    const shelfSlotEl = dropTarget && dropTarget.closest('.shelf .slot');
+    const beltSlotEl = dropTarget && dropTarget.closest('.beltSlot');
+
+    if (shelfSlotEl) {
+      const targetIndex = Number(shelfSlotEl.dataset.index);
       if (drag.source === 'belt') attemptMoveFromBelt(drag.beltIndex, drag.slotIndex, targetIndex);
       else attemptMove(drag.sourceIndex, targetIndex);
+    } else if (beltSlotEl && drag.source === 'grid') {
+      const targetBeltIndex = Number(beltSlotEl.dataset.beltIndex);
+      const targetSlotIndex = Number(beltSlotEl.dataset.slotIndex);
+      attemptMoveToBelt(drag.sourceIndex, targetBeltIndex, targetSlotIndex);
     }
 
     endDrag(oldRects);
@@ -633,7 +650,28 @@
     pushHistory();
     shelf[targetIndex].push(slot.item);
     slot.item = null;
-    if (slot.el) { slot.el.remove(); slot.el = null; }
+    if (slot.itemEl) { slot.itemEl.remove(); slot.itemEl = null; }
+
+    moves += 1;
+    resolveTriples();
+    checkWin();
+  }
+
+  // The reverse direction: park a shelf item onto an empty, currently
+  // passing belt slot. It's an extra scratch space beyond the shelf's
+  // own empty cells, but a risky one — once parked, it keeps moving and
+  // has to be caught again later, unlike a shelf cell which just waits.
+  function attemptMoveToBelt(sourceIndex, beltIndex, slotIndex) {
+    const slot = belts[beltIndex].items[slotIndex];
+    if (!slot || slot.item) return; // target must be a genuinely empty belt slot
+    const top = topOf(shelf[sourceIndex]);
+    if (!top || isLocked(top)) return;
+
+    pushHistory();
+    shelf[sourceIndex].pop();
+    slot.item = top;
+    slot.itemEl = makeBeltItemEl(top, beltIndex, slotIndex);
+    slot.slotEl.appendChild(slot.itemEl);
 
     moves += 1;
     resolveTriples();
@@ -685,10 +723,10 @@
   }
 
   // Restores which belt slots hold an item. A revived slot gets a fresh
-  // DOM element appended to its belt's track; the animation loop then
-  // just resumes moving it from wherever the belt's offset is now (a
-  // small visual jump is an acceptable trade for not tracking exact
-  // continuous-time positions in undo history).
+  // DOM element appended into its slot's (still-moving) wrapper; the
+  // animation loop then just carries it along from wherever the belt's
+  // offset is now (a small visual jump is an acceptable trade for not
+  // tracking exact continuous-time positions in undo history).
   function restoreBelts(snapshot) {
     if (!snapshot) return;
     belts.forEach((belt, i) => {
@@ -696,12 +734,12 @@
         const wasItem = snapshot[i][k];
         if (wasItem && !slot.item) {
           slot.item = wasItem;
-          slot.el = makeBeltItemEl(wasItem, i, k);
-          belt.trackEl.appendChild(slot.el);
+          slot.itemEl = makeBeltItemEl(wasItem, i, k);
+          slot.slotEl.appendChild(slot.itemEl);
         } else if (!wasItem && slot.item) {
-          if (slot.el) slot.el.remove();
+          if (slot.itemEl) slot.itemEl.remove();
           slot.item = null;
-          slot.el = null;
+          slot.itemEl = null;
         }
       });
     });
