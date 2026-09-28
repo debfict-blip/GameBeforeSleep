@@ -112,52 +112,83 @@
     return { groups, lockedCount, slack, beltCount, beltSpeed };
   }
 
-  function buildItemPool(level) {
+  // Builds groups rather than a flat item pool, and keeps each group's 3
+  // items together through shuffling — that's what lets splitPools hand
+  // belts and the grid whole groups instead of an arbitrary item count,
+  // which keeps every type's count a clean multiple of 3 in *both* places
+  // (the same property the hammer fix relies on), and lets buildStacks
+  // guarantee one whole group starts fully exposed on the grid.
+  function buildGroups(level) {
     const { groups, lockedCount } = levelConfig(level);
-    const pool = [];
+    const list = [];
     for (let g = 0; g < groups; g++) {
       const locked = g >= groups - lockedCount;
       const rank = locked ? g - (groups - lockedCount) : -1;
       const cost = locked ? 2 * (rank + 1) : null;
       const type = ITEM_ICONS[g % ITEM_ICONS.length];
-      for (let s = 0; s < 3; s++) pool.push({ type, group: locked ? g : null, cost });
+      const items = [];
+      for (let s = 0; s < 3; s++) items.push({ type, group: locked ? g : null, cost });
+      list.push({ locked, items });
     }
-    return shuffle(pool);
+    return shuffle(list);
   }
 
-  // Splits the level's full item pool into what rides the belts (always
-  // unlocked items only, so nothing hidden-and-locked ends up somewhere
-  // it can't be unlocked from) and what gets distributed into the shelf.
+  // Splits the level's groups into what rides the belts (always unlocked
+  // groups only, so nothing hidden-and-locked ends up somewhere it can't
+  // be unlocked from) and what gets distributed into the shelf — at least
+  // one unlocked group is always kept back for the grid, both so a level
+  // can still fund its own locks from its own clears, and so there's
+  // always a whole group available to guarantee exposed on the shelf.
   function splitPools(level) {
     const { beltCount } = levelConfig(level);
-    const fullPool = buildItemPool(level);
-    const unlocked = fullPool.filter((p) => p.group === null);
-    const locked = fullPool.filter((p) => p.group !== null);
+    const groupsList = buildGroups(level);
+    const unlockedGroups = groupsList.filter((g) => !g.locked);
+    const lockedGroups = groupsList.filter((g) => g.locked);
 
-    const beltNeed = Math.min(beltCount * ITEMS_PER_BELT, unlocked.length);
-    const beltItems = unlocked.slice(0, beltNeed);
-    const gridPool = shuffle(unlocked.slice(beltNeed).concat(locked));
+    const beltGroupCount = Math.min(
+      Math.floor((beltCount * ITEMS_PER_BELT) / 3),
+      Math.max(0, unlockedGroups.length - 1)
+    );
+    const beltGroups = unlockedGroups.slice(0, beltGroupCount);
+    const gridUnlockedGroups = unlockedGroups.slice(beltGroupCount);
 
-    return { gridPool, beltItems };
+    const beltItems = beltGroups.flatMap((g) => g.items);
+    const gridPool = shuffle(gridUnlockedGroups.concat(lockedGroups).flatMap((g) => g.items));
+
+    return { gridPool, beltItems, gridUnlockedGroups };
   }
 
   // Distributes a shuffled item pool across CELLS - slack occupied cells
   // as stacks: every occupied cell is guaranteed at least one item (so
   // slack stays exact), then the rest land on random occupied cells,
   // producing naturally uneven pile heights.
-  function buildStacks(level, pool) {
+  //
+  // `starterItems`, when given, is one whole unlocked group's 3 items.
+  // They're held out of the normal distribution and instead pushed last
+  // onto three distinct occupied cells, so they're guaranteed to be each
+  // cell's current top — a same-type triple the player can always find
+  // and maneuver into a row using nothing but currently-visible items,
+  // with zero need to dig into any hidden pile first.
+  function buildStacks(level, pool, starterItems) {
     const { slack } = levelConfig(level);
     const cellOrder = shuffle([...Array(CELLS).keys()]);
     const occupied = cellOrder.slice(slack);
 
     const stacks = Array.from({ length: CELLS }, () => []);
+    const rest = starterItems ? pool.filter((p) => !starterItems.includes(p)) : pool;
 
     occupied.forEach((cellIndex, i) => {
-      if (i < pool.length) stacks[cellIndex].push(pool[i]);
+      if (i < rest.length) stacks[cellIndex].push(rest[i]);
     });
-    for (let i = occupied.length; i < pool.length; i++) {
+    for (let i = occupied.length; i < rest.length; i++) {
       const cellIndex = occupied[Math.floor(Math.random() * occupied.length)];
-      stacks[cellIndex].push(pool[i]);
+      stacks[cellIndex].push(rest[i]);
+    }
+
+    if (starterItems) {
+      shuffle(occupied.slice()).slice(0, 3).forEach((cellIndex, i) => {
+        if (starterItems[i]) stacks[cellIndex].push(starterItems[i]);
+      });
     }
 
     return stacks;
@@ -189,8 +220,9 @@
     save(KEYS.level, level);
     levelNumberEl.textContent = String(level);
 
-    const { gridPool, beltItems } = splitPools(level);
-    const stacks = buildStacks(level, gridPool);
+    const { gridPool, beltItems, gridUnlockedGroups } = splitPools(level);
+    const starterGroup = gridUnlockedGroups[Math.floor(Math.random() * gridUnlockedGroups.length)];
+    const stacks = buildStacks(level, gridPool, starterGroup.items);
     shelf = stacks.map((stack) => stack.map((p) => ({ id: nextId++, type: p.type, group: p.group })));
     lockedGroups = {};
     stacks.forEach((stack) => {
