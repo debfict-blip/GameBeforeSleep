@@ -136,6 +136,36 @@ body {
   opacity: 0.65;
 }
 
+.boardSection.hidden {
+  display: none;
+}
+
+.beltTrack {
+  position: relative;
+  height: 58px;
+  overflow: hidden;
+  border-radius: 14px;
+  background:
+    linear-gradient(var(--card), var(--card)),
+    repeating-linear-gradient(-45deg, rgba(255, 210, 122, 0.08) 0 10px, transparent 10px 20px);
+  border: 1px solid var(--card-border);
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.35);
+}
+
+.beltTrack + .beltTrack {
+  margin-top: 8px;
+}
+
+.item.belt-item {
+  position: absolute;
+  top: 5px;
+  left: 0;
+  width: 48px;
+  height: 48px;
+  font-size: 24px;
+  will-change: transform;
+}
+
 .powerBar {
   display: flex;
   justify-content: center;

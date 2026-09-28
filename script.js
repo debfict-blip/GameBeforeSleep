@@ -5,6 +5,10 @@
   const HISTORY_LIMIT = 20;
   const START_HAMMERS = 2;
   const START_UNDOS = 2;
+  const ITEMS_PER_BELT = 7;
+  const BELT_ITEM_SIZE = 48;
+  const BELT_GAP = 16;
+  const BELT_SPACING = BELT_ITEM_SIZE + BELT_GAP; // px between consecutive belt slots
 
   const KEYS = {
     level: 'gbs-level',
@@ -26,6 +30,7 @@
   const restartBtn = document.getElementById('restartBtn');
   const nextLevelBtn = document.getElementById('nextLevelBtn');
   const fxLayer = document.getElementById('fxLayer');
+  const beltsSectionEl = document.getElementById('beltsSection');
 
   // shelf[i] is a STACK (array) of item objects, back-to-front; the last
   // element is the visible, draggable top. An empty array means an empty
@@ -38,6 +43,16 @@
   let hammerActive = false;
   let moves = 0;
   let history = [];
+
+  // Each belt is a fixed-length loop of slots that scrolls right-to-left
+  // forever (never loses an unclaimed item — no hard fail state). Belts
+  // never carry locked items, so isLocked() is never checked on them.
+  // slot.baseX is the slot's position along the belt's own virtual track;
+  // it gets bumped forward by a full lap once it scrolls off-screen, so
+  // the loop is seamless without needing duplicate DOM elements.
+  let belts = [];
+  let beltAnimHandle = null;
+  let beltLastTs = null;
 
   let currentLevel = loadInt(KEYS.level, 1);
   let stars = loadInt(KEYS.stars, 0);
@@ -82,12 +97,19 @@
   // A few of the rarest groups start locked behind a star cost, but at
   // least two groups are always left unlocked so a level can always earn
   // enough stars, from its own clears alone, to pay for the rest.
+  //
+  // From level 5 on, some of a level's items ride conveyor belts instead
+  // of sitting in the shelf: belts loop forever (an unclaimed item just
+  // comes back around, never lost) but they're a second thing to track
+  // alongside the grid, and more of them stack in at higher levels.
   function levelConfig(level) {
     const groups = Math.min(6 + (level - 1) * 2, 50);
     const maxLocked = Math.max(0, groups - 2);
     const lockedCount = level >= 3 ? Math.min(1 + Math.floor((level - 3) / 4), maxLocked) : 0;
     const slack = Math.max(2, 6 - Math.floor((level - 1) / 3));
-    return { groups, lockedCount, slack };
+    const beltCount = level >= 5 ? Math.min(1 + Math.floor((level - 5) / 7), 3) : 0;
+    const beltSpeed = Math.min(40 + level * 1.2, 90); // px/sec
+    return { groups, lockedCount, slack, beltCount, beltSpeed };
   }
 
   function buildItemPool(level) {
@@ -103,17 +125,31 @@
     return shuffle(pool);
   }
 
-  // Distributes the shuffled item pool across CELLS - slack occupied
-  // cells as stacks: every occupied cell is guaranteed at least one item
-  // (so slack stays exact), then the rest land on random occupied cells,
+  // Splits the level's full item pool into what rides the belts (always
+  // unlocked items only, so nothing hidden-and-locked ends up somewhere
+  // it can't be unlocked from) and what gets distributed into the shelf.
+  function splitPools(level) {
+    const { beltCount } = levelConfig(level);
+    const fullPool = buildItemPool(level);
+    const unlocked = fullPool.filter((p) => p.group === null);
+    const locked = fullPool.filter((p) => p.group !== null);
+
+    const beltNeed = Math.min(beltCount * ITEMS_PER_BELT, unlocked.length);
+    const beltItems = unlocked.slice(0, beltNeed);
+    const gridPool = shuffle(unlocked.slice(beltNeed).concat(locked));
+
+    return { gridPool, beltItems };
+  }
+
+  // Distributes a shuffled item pool across CELLS - slack occupied cells
+  // as stacks: every occupied cell is guaranteed at least one item (so
+  // slack stays exact), then the rest land on random occupied cells,
   // producing naturally uneven pile heights.
-  function buildStacks(level) {
+  function buildStacks(level, pool) {
     const { slack } = levelConfig(level);
     const cellOrder = shuffle([...Array(CELLS).keys()]);
-    const emptyCells = new Set(cellOrder.slice(0, slack));
     const occupied = cellOrder.slice(slack);
 
-    const pool = buildItemPool(level);
     const stacks = Array.from({ length: CELLS }, () => []);
 
     occupied.forEach((cellIndex, i) => {
@@ -124,7 +160,28 @@
       stacks[cellIndex].push(pool[i]);
     }
 
-    return { stacks, emptyCells };
+    return stacks;
+  }
+
+  // Lays beltItems out evenly across `beltCount` belts, ITEMS_PER_BELT
+  // slots each (unused trailing slots on the last belt stay empty).
+  function buildBelts(level, beltItems) {
+    const { beltCount, beltSpeed } = levelConfig(level);
+    const items = shuffle(beltItems.slice());
+    const result = [];
+    for (let b = 0; b < beltCount; b++) {
+      const slots = [];
+      for (let s = 0; s < ITEMS_PER_BELT; s++) {
+        const p = items.shift();
+        slots.push({
+          baseX: s * BELT_SPACING,
+          item: p ? { id: nextId++, type: p.type, group: p.group } : null,
+          el: null,
+        });
+      }
+      result.push({ speed: beltSpeed, offset: 0, trackEl: null, items: slots });
+    }
+    return result;
   }
 
   function newLevel(level) {
@@ -132,7 +189,8 @@
     save(KEYS.level, level);
     levelNumberEl.textContent = String(level);
 
-    const { stacks } = buildStacks(level);
+    const { gridPool, beltItems } = splitPools(level);
+    const stacks = buildStacks(level, gridPool);
     shelf = stacks.map((stack) => stack.map((p) => ({ id: nextId++, type: p.type, group: p.group })));
     lockedGroups = {};
     stacks.forEach((stack) => {
@@ -140,6 +198,9 @@
         if (p.group !== null) lockedGroups[p.group] = p.cost;
       });
     });
+
+    belts = buildBelts(level, beltItems);
+    renderBelts();
 
     moves = 0;
     history = [];
@@ -149,6 +210,70 @@
     resolveTriples(); // a fresh shuffle can spawn a triple by pure chance; clear it up front
     updateHud();
     render();
+    startBeltLoop();
+  }
+
+  function renderBelts() {
+    beltsSectionEl.innerHTML = '';
+    beltsSectionEl.classList.toggle('hidden', belts.length === 0);
+    if (belts.length === 0) return;
+
+    const label = document.createElement('span');
+    label.className = 'sectionLabel';
+    label.textContent = belts.length > 1 ? 'Delivery Belts' : 'Delivery Belt';
+    beltsSectionEl.appendChild(label);
+
+    belts.forEach((belt, beltIndex) => {
+      const track = document.createElement('div');
+      track.className = 'beltTrack';
+      belt.trackEl = track;
+      belt.items.forEach((slot, slotIndex) => {
+        if (slot.item) slot.el = makeBeltItemEl(slot.item, beltIndex, slotIndex);
+        if (slot.el) track.appendChild(slot.el);
+      });
+      beltsSectionEl.appendChild(track);
+    });
+  }
+
+  function makeBeltItemEl(item, beltIndex, slotIndex) {
+    const el = document.createElement('div');
+    el.className = 'item belt-item';
+    el.textContent = item.type;
+    el.dataset.source = 'belt';
+    el.dataset.beltIndex = String(beltIndex);
+    el.dataset.slotIndex = String(slotIndex);
+    el.dataset.id = String(item.id);
+    el.addEventListener('pointerdown', onPointerDown);
+    return el;
+  }
+
+  function startBeltLoop() {
+    if (beltAnimHandle !== null) return; // already running
+    beltLastTs = null;
+    const step = (ts) => {
+      if (beltLastTs === null) beltLastTs = ts;
+      const dt = (ts - beltLastTs) / 1000;
+      beltLastTs = ts;
+
+      belts.forEach((belt) => {
+        belt.offset += belt.speed * dt;
+        const trackLength = ITEMS_PER_BELT * BELT_SPACING;
+        belt.items.forEach((slot, idx) => {
+          if (!slot.item || !slot.el) return;
+          // Skip the slot currently being dragged — its ghost represents it now.
+          if (drag && drag.source === 'belt' && drag.beltIndex === belts.indexOf(belt) && drag.slotIndex === idx) return;
+          let x = slot.baseX - belt.offset;
+          if (x < -BELT_ITEM_SIZE) {
+            slot.baseX += trackLength;
+            x = slot.baseX - belt.offset;
+          }
+          slot.el.style.transform = `translateX(${x}px)`;
+        });
+      });
+
+      beltAnimHandle = requestAnimationFrame(step);
+    };
+    beltAnimHandle = requestAnimationFrame(step);
   }
 
   function updateHud() {
@@ -240,6 +365,7 @@
     const el = document.createElement('div');
     el.className = 'item';
     el.textContent = item.type;
+    el.dataset.source = 'grid';
     el.dataset.index = String(index);
     el.dataset.id = String(item.id);
     if (depth > 1) {
@@ -283,8 +409,11 @@
   function onPointerDown(e) {
     if (drag) return;
     const el = e.currentTarget;
-    const index = Number(el.dataset.index);
-    const top = topOf(shelf[index]);
+    const fromBelt = el.dataset.source === 'belt';
+    const beltIndex = fromBelt ? Number(el.dataset.beltIndex) : null;
+    const slotIndex = fromBelt ? Number(el.dataset.slotIndex) : null;
+    const index = fromBelt ? null : Number(el.dataset.index);
+    const top = fromBelt ? belts[beltIndex].items[slotIndex].item : topOf(shelf[index]);
     if (!top) return;
 
     if (hammerActive) {
@@ -292,7 +421,14 @@
       const oldRects = captureRects();
       const rect = el.getBoundingClientRect();
       pushHistory();
-      shelf[index].pop();
+      if (fromBelt) {
+        const slot = belts[beltIndex].items[slotIndex];
+        slot.item = null;
+        slot.el.remove();
+        slot.el = null;
+      } else {
+        shelf[index].pop();
+      }
       hammers -= 1;
       hammerActive = false;
       save(KEYS.hammers, hammers);
@@ -316,12 +452,9 @@
 
     el.classList.add('dragging-source');
 
-    drag = {
-      pointerId: e.pointerId,
-      sourceIndex: index,
-      el,
-      ghost,
-    };
+    drag = fromBelt
+      ? { pointerId: e.pointerId, source: 'belt', beltIndex, slotIndex, el, ghost }
+      : { pointerId: e.pointerId, source: 'grid', sourceIndex: index, el, ghost };
 
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerup', onPointerUp);
@@ -339,10 +472,11 @@
 
     const oldRects = captureRects();
     const dropTarget = document.elementFromPoint(e.clientX, e.clientY);
-    const slotEl = dropTarget && dropTarget.closest('.slot');
+    const slotEl = dropTarget && dropTarget.closest('.shelf .slot');
     if (slotEl) {
       const targetIndex = Number(slotEl.dataset.index);
-      attemptMove(drag.sourceIndex, targetIndex);
+      if (drag.source === 'belt') attemptMoveFromBelt(drag.beltIndex, drag.slotIndex, targetIndex);
+      else attemptMove(drag.sourceIndex, targetIndex);
     }
 
     endDrag(oldRects);
@@ -367,6 +501,7 @@
   function pushHistory() {
     history.push({
       shelf: shelf.map((stack) => stack.map((item) => ({ ...item }))),
+      belts: belts.map((belt) => belt.items.map((slot) => (slot.item ? { ...slot.item } : null))),
       moves,
     });
     if (history.length > HISTORY_LIMIT) history.shift();
@@ -384,6 +519,24 @@
 
     pushHistory();
     shelf[targetIndex].push(shelf[sourceIndex].pop());
+
+    moves += 1;
+    resolveTriples();
+    checkWin();
+  }
+
+  // Same empty-cell-only rule, just sourced from a belt slot instead of
+  // another shelf stack. The claimed slot never refills — that belt
+  // just has one less item cycling round from then on.
+  function attemptMoveFromBelt(beltIndex, slotIndex, targetIndex) {
+    if (shelf[targetIndex].length > 0) return;
+    const slot = belts[beltIndex].items[slotIndex];
+    if (!slot || !slot.item) return;
+
+    pushHistory();
+    shelf[targetIndex].push(slot.item);
+    slot.item = null;
+    if (slot.el) { slot.el.remove(); slot.el = null; }
 
     moves += 1;
     resolveTriples();
@@ -427,10 +580,34 @@
     const prev = history.pop();
     shelf = prev.shelf;
     moves = prev.moves;
+    restoreBelts(prev.belts);
     undos -= 1;
     save(KEYS.undos, undos);
     render();
     applyFlip(oldRects);
+  }
+
+  // Restores which belt slots hold an item. A revived slot gets a fresh
+  // DOM element appended to its belt's track; the animation loop then
+  // just resumes moving it from wherever the belt's offset is now (a
+  // small visual jump is an acceptable trade for not tracking exact
+  // continuous-time positions in undo history).
+  function restoreBelts(snapshot) {
+    if (!snapshot) return;
+    belts.forEach((belt, i) => {
+      belt.items.forEach((slot, k) => {
+        const wasItem = snapshot[i][k];
+        if (wasItem && !slot.item) {
+          slot.item = wasItem;
+          slot.el = makeBeltItemEl(wasItem, i, k);
+          belt.trackEl.appendChild(slot.el);
+        } else if (!wasItem && slot.item) {
+          if (slot.el) slot.el.remove();
+          slot.item = null;
+          slot.el = null;
+        }
+      });
+    });
   }
 
   function toggleHammer() {
@@ -440,7 +617,9 @@
   }
 
   function checkWin() {
-    if (shelf.every((stack) => stack.length === 0)) {
+    const shelfDone = shelf.every((stack) => stack.length === 0);
+    const beltsDone = belts.every((belt) => belt.items.every((slot) => !slot.item));
+    if (shelfDone && beltsDone) {
       hammers += 1;
       undos += 1;
       save(KEYS.hammers, hammers);
