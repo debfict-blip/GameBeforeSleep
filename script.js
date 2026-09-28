@@ -1,6 +1,7 @@
 (() => {
   const ITEM_ICONS = ['🍎', '🥐', '🧀', '🥛', '🍫', '🥕', '🧃', '🍞', '🥚', '🍯', '🧻', '🥫'];
   const COLS = 6; // must match .shelf's grid-template-columns in style.css
+  const CELLS = 24; // fixed visible board size (4 rows x 6 cols) regardless of level
   const HISTORY_LIMIT = 20;
   const START_HAMMERS = 2;
   const START_UNDOS = 2;
@@ -26,7 +27,11 @@
   const nextLevelBtn = document.getElementById('nextLevelBtn');
   const fxLayer = document.getElementById('fxLayer');
 
-  let shelf = []; // single unified board: item cells and `null` (empty) slots
+  // shelf[i] is a STACK (array) of item objects, back-to-front; the last
+  // element is the visible, draggable top. An empty array means an empty
+  // cell. Items further down are genuinely hidden — their type isn't
+  // revealed until everything above them is cleared away.
+  let shelf = [];
   let lockedGroups = {}; // groupId -> star cost remaining to unlock
   let nextId = 1;
   let drag = null;
@@ -62,40 +67,64 @@
     return arr;
   }
 
-  // Difficulty ramps by widening the type variety first, then adding a
-  // second (and third...) set of each type once variety hits the icon cap.
-  // A few of the rarest types start locked behind a star cost, but at least
-  // two types are always left unlocked so a level can always earn enough
-  // stars, from its own clears alone, to pay for the rest.
-  //
-  // `slack` is the number of empty slots scattered in among the items: the
-  // board holds exactly items.length + slack cells, and a move can only
-  // drop an item into one of those empty cells (never swap two occupied
-  // ones). Fewer empty cells means more shuffling to free up the spot you
-  // actually need, so slack is the main difficulty knob and tapers down
-  // as levels rise — floored above 1 so it stays a puzzle, not a chore.
+  // Difficulty ramps along two axes at once:
+  //  - `groups`: how many 3-item stacks-worth of stock exist in total
+  //    (types repeat once past the icon set — several separate stacks of
+  //    the "same product" is normal for a real shelf). This climbs from 6
+  //    groups (18 items) at level 1 toward 50 groups (150 items) by the
+  //    time variety and restocking both cap out.
+  //  - `slack`: how many of the fixed CELLS visible positions start
+  //    completely empty. Occupied cells split the remaining items into
+  //    randomly-sized stacks, so most items start hidden underneath
+  //    others and only surface once whatever's on top is cleared. Fewer
+  //    empty cells (less slack) means less room to maneuver, so slack
+  //    tapers from 6 down to a floor of 2 as levels rise.
+  // A few of the rarest groups start locked behind a star cost, but at
+  // least two groups are always left unlocked so a level can always earn
+  // enough stars, from its own clears alone, to pay for the rest.
   function levelConfig(level) {
-    const types = Math.min(3 + Math.floor((level - 1) / 2), ITEM_ICONS.length);
-    const setsPerType = 1 + Math.floor((level - 1) / (2 * ITEM_ICONS.length));
-    const maxLocked = Math.max(0, types - 2);
+    const groups = Math.min(6 + (level - 1) * 2, 50);
+    const maxLocked = Math.max(0, groups - 2);
     const lockedCount = level >= 3 ? Math.min(1 + Math.floor((level - 3) / 4), maxLocked) : 0;
     const slack = Math.max(2, 6 - Math.floor((level - 1) / 3));
-    return { types, setsPerType, lockedCount, slack };
+    return { groups, lockedCount, slack };
   }
 
-  function buildShelfPool(level) {
-    const { types, setsPerType, lockedCount, slack } = levelConfig(level);
+  function buildItemPool(level) {
+    const { groups, lockedCount } = levelConfig(level);
     const pool = [];
-    for (let t = 0; t < types; t++) {
-      const locked = t >= types - lockedCount;
-      const rank = locked ? t - (types - lockedCount) : -1;
+    for (let g = 0; g < groups; g++) {
+      const locked = g >= groups - lockedCount;
+      const rank = locked ? g - (groups - lockedCount) : -1;
       const cost = locked ? 2 * (rank + 1) : null;
-      for (let s = 0; s < setsPerType * 3; s++) {
-        pool.push({ type: ITEM_ICONS[t], group: locked ? t : null, cost });
-      }
+      const type = ITEM_ICONS[g % ITEM_ICONS.length];
+      for (let s = 0; s < 3; s++) pool.push({ type, group: locked ? g : null, cost });
     }
-    for (let k = 0; k < slack; k++) pool.push(null); // empty slots, scattered in by the shuffle below
     return shuffle(pool);
+  }
+
+  // Distributes the shuffled item pool across CELLS - slack occupied
+  // cells as stacks: every occupied cell is guaranteed at least one item
+  // (so slack stays exact), then the rest land on random occupied cells,
+  // producing naturally uneven pile heights.
+  function buildStacks(level) {
+    const { slack } = levelConfig(level);
+    const cellOrder = shuffle([...Array(CELLS).keys()]);
+    const emptyCells = new Set(cellOrder.slice(0, slack));
+    const occupied = cellOrder.slice(slack);
+
+    const pool = buildItemPool(level);
+    const stacks = Array.from({ length: CELLS }, () => []);
+
+    occupied.forEach((cellIndex, i) => {
+      if (i < pool.length) stacks[cellIndex].push(pool[i]);
+    });
+    for (let i = occupied.length; i < pool.length; i++) {
+      const cellIndex = occupied[Math.floor(Math.random() * occupied.length)];
+      stacks[cellIndex].push(pool[i]);
+    }
+
+    return { stacks, emptyCells };
   }
 
   function newLevel(level) {
@@ -103,11 +132,13 @@
     save(KEYS.level, level);
     levelNumberEl.textContent = String(level);
 
-    const pool = buildShelfPool(level);
-    shelf = pool.map((p) => (p ? { id: nextId++, type: p.type, group: p.group } : null));
+    const { stacks } = buildStacks(level);
+    shelf = stacks.map((stack) => stack.map((p) => ({ id: nextId++, type: p.type, group: p.group })));
     lockedGroups = {};
-    pool.forEach((p) => {
-      if (p && p.group !== null) lockedGroups[p.group] = p.cost;
+    stacks.forEach((stack) => {
+      stack.forEach((p) => {
+        if (p.group !== null) lockedGroups[p.group] = p.cost;
+      });
     });
 
     moves = 0;
@@ -130,8 +161,12 @@
     undoBtn.disabled = undos <= 0 || history.length === 0;
   }
 
-  function isLocked(cell) {
-    return cell && cell.group !== null && lockedGroups[cell.group] !== undefined;
+  function topOf(stack) {
+    return stack.length ? stack[stack.length - 1] : null;
+  }
+
+  function isLocked(item) {
+    return item && item.group !== null && lockedGroups[item.group] !== undefined;
   }
 
   // FLIP-style motion: capture each item's on-screen position before a
@@ -188,33 +223,40 @@
 
   function render() {
     shelfEl.innerHTML = '';
-    shelf.forEach((cell, index) => {
+    shelf.forEach((stack, index) => {
       const slot = document.createElement('div');
       slot.className = 'slot';
       slot.dataset.index = String(index);
-      if (cell) {
-        slot.appendChild(isLocked(cell) ? makeLockedEl(cell, index) : makeItemEl(cell, index));
+      const top = topOf(stack);
+      if (top) {
+        slot.appendChild(isLocked(top) ? makeLockedEl(top, index) : makeItemEl(top, index, stack.length));
       }
       shelfEl.appendChild(slot);
     });
     updateHud();
   }
 
-  function makeItemEl(cell, index) {
+  function makeItemEl(item, index, depth) {
     const el = document.createElement('div');
     el.className = 'item';
-    el.textContent = cell.type;
+    el.textContent = item.type;
     el.dataset.index = String(index);
-    el.dataset.id = String(cell.id);
+    el.dataset.id = String(item.id);
+    if (depth > 1) {
+      const badge = document.createElement('span');
+      badge.className = 'depth-badge';
+      badge.textContent = String(depth);
+      el.appendChild(badge);
+    }
     el.addEventListener('pointerdown', onPointerDown);
     return el;
   }
 
-  function makeLockedEl(cell, index) {
+  function makeLockedEl(item, index) {
     const el = document.createElement('div');
     el.className = 'item locked';
-    el.innerHTML = `<span class="lock-icon">🔒</span><span class="lock-cost">${lockedGroups[cell.group]}⭐</span>`;
-    el.addEventListener('click', () => attemptUnlock(cell.group, el));
+    el.innerHTML = `<span class="lock-icon">🔒</span><span class="lock-cost">${lockedGroups[item.group]}⭐</span>`;
+    el.addEventListener('click', () => attemptUnlock(item.group, el));
     return el;
   }
 
@@ -225,9 +267,10 @@
       save(KEYS.stars, stars);
       delete lockedGroups[group];
       render();
-      shelf.forEach((cell) => {
-        if (cell && cell.group === group) {
-          const revealed = shelfEl.querySelector(`[data-id="${cell.id}"]`);
+      shelf.forEach((stack) => {
+        const top = topOf(stack);
+        if (top && top.group === group) {
+          const revealed = shelfEl.querySelector(`[data-id="${top.id}"]`);
           if (revealed) revealed.classList.add('reveal-pop');
         }
       });
@@ -241,15 +284,15 @@
     if (drag) return;
     const el = e.currentTarget;
     const index = Number(el.dataset.index);
-    const cell = shelf[index];
-    if (!cell) return;
+    const top = topOf(shelf[index]);
+    if (!top) return;
 
     if (hammerActive) {
       e.preventDefault();
       const oldRects = captureRects();
       const rect = el.getBoundingClientRect();
       pushHistory();
-      shelf[index] = null;
+      shelf[index].pop();
       hammers -= 1;
       hammerActive = false;
       save(KEYS.hammers, hammers);
@@ -257,7 +300,7 @@
       checkWin();
       render();
       applyFlip(oldRects);
-      spawnPopGhost(rect, cell.type);
+      spawnPopGhost(rect, top.type);
       return;
     }
 
@@ -266,7 +309,7 @@
 
     const ghost = document.createElement('div');
     ghost.className = 'drag-ghost';
-    ghost.textContent = cell.type;
+    ghost.textContent = top.type;
     ghost.style.left = e.clientX + 'px';
     ghost.style.top = e.clientY + 'px';
     document.body.appendChild(ghost);
@@ -323,22 +366,24 @@
 
   function pushHistory() {
     history.push({
-      shelf: shelf.map((c) => (c ? { ...c } : null)),
+      shelf: shelf.map((stack) => stack.map((item) => ({ ...item }))),
       moves,
     });
     if (history.length > HISTORY_LIMIT) history.shift();
   }
 
-  // A move only ever drops an item into an empty (and unlocked) cell —
-  // never a direct swap with an occupied one. That scarcity of empty
-  // cells is the whole puzzle: freeing up the one you need takes planning.
+  // A move only ever drops the top item of a stack into a completely
+  // empty cell — never a direct swap, and never onto another stack even
+  // if it's unlocked. That scarcity of empty cells, combined with items
+  // being physically hidden until uncovered, is the whole puzzle.
   function attemptMove(sourceIndex, targetIndex) {
     if (sourceIndex === targetIndex) return;
-    if (shelf[targetIndex]) return; // target must be empty (also blocks locked cells)
+    if (shelf[targetIndex].length > 0) return; // target must be a genuinely empty cell
+    const top = topOf(shelf[sourceIndex]);
+    if (!top || isLocked(top)) return;
 
     pushHistory();
-    shelf[targetIndex] = shelf[sourceIndex];
-    shelf[sourceIndex] = null;
+    shelf[targetIndex].push(shelf[sourceIndex].pop());
 
     moves += 1;
     resolveTriples();
@@ -352,15 +397,17 @@
       for (let rowStart = 0; rowStart < shelf.length && !clearedAny; rowStart += COLS) {
         const rowEnd = Math.min(rowStart + COLS, shelf.length);
         for (let i = rowStart; i <= rowEnd - 3; i++) {
-          const a = shelf[i], b = shelf[i + 1], c = shelf[i + 2];
-          if (a && b && c && a.type === b.type && c.type === b.type) {
+          const a = topOf(shelf[i]), b = topOf(shelf[i + 1]), c = topOf(shelf[i + 2]);
+          if (a && b && c && !isLocked(a) && !isLocked(b) && !isLocked(c) && a.type === b.type && c.type === b.type) {
             // Grab the slot rects before rendering wipes this frame's DOM, so
             // the clear pop appears exactly where the trio was sitting.
             const rects = [i, i + 1, i + 2].map((idx) => {
               const slotEl = shelfEl.children[idx];
               return slotEl ? slotEl.getBoundingClientRect() : null;
             });
-            shelf[i] = shelf[i + 1] = shelf[i + 2] = null;
+            shelf[i].pop();
+            shelf[i + 1].pop();
+            shelf[i + 2].pop();
             clearedAny = true;
             stars += 1;
             save(KEYS.stars, stars);
@@ -393,7 +440,7 @@
   }
 
   function checkWin() {
-    if (shelf.every((c) => c === null)) {
+    if (shelf.every((stack) => stack.length === 0)) {
       hammers += 1;
       undos += 1;
       save(KEYS.hammers, hammers);
