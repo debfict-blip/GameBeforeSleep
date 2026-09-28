@@ -158,37 +158,47 @@
     return { gridPool, beltItems, gridUnlockedGroups };
   }
 
-  // Distributes a shuffled item pool across CELLS - slack occupied cells
-  // as stacks: every occupied cell is guaranteed at least one item (so
-  // slack stays exact), then the rest land on random occupied cells,
-  // producing naturally uneven pile heights.
+  // Distributes a shuffled item pool across occupied cells as stacks
+  // (every occupied cell gets at least one item, then extras land on
+  // random occupied cells, producing naturally uneven pile heights) —
+  // except for four cells reserved up front to guarantee a genuinely
+  // zero-dig opening move.
   //
-  // `starterItems`, when given, is one whole unlocked group's 3 items.
-  // They're held out of the normal distribution and instead pushed last
-  // onto three distinct occupied cells, so they're guaranteed to be each
-  // cell's current top — a same-type triple the player can always find
-  // and maneuver into a row using nothing but currently-visible items,
-  // with zero need to dig into any hidden pile first.
+  // Being merely visible isn't enough: if every spare copy of that type
+  // is buried under something else, completing the triple still forces
+  // a reveal somewhere. So the reservation is stricter — pick a row and
+  // a 3-column window in it; two of those three cells get two of
+  // `starterItems` with NOTHING else ever placed on top (depth exactly
+  // 1), and the third window cell is left as one of the level's empty
+  // slots. The third starter item goes alone (also depth 1) in some
+  // other cell entirely. The player can always finish this exact triple
+  // with a single drag into that one empty slot, using two items that
+  // have nothing hidden under them and disturbing nothing else.
   function buildStacks(level, pool, starterItems) {
     const { slack } = levelConfig(level);
-    const cellOrder = shuffle([...Array(CELLS).keys()]);
-    const occupied = cellOrder.slice(slack);
+    const allCells = [...Array(CELLS).keys()];
+
+    const row = Math.floor(Math.random() * (CELLS / COLS));
+    const col = Math.floor(Math.random() * (COLS - 2)); // 0..COLS-3: a valid 3-wide window
+    const windowCells = [row * COLS + col, row * COLS + col + 1, row * COLS + col + 2];
+    const emptyPos = windowCells[Math.floor(Math.random() * 3)];
+    const fillPositions = windowCells.filter((p) => p !== emptyPos);
+
+    const remaining = shuffle(allCells.filter((p) => !windowCells.includes(p)));
+    const otherStarterCell = remaining.pop();
+    const restOccupied = remaining.slice(slack - 1); // remaining.slice(0, slack - 1) stay empty
 
     const stacks = Array.from({ length: CELLS }, () => []);
-    const rest = starterItems ? pool.filter((p) => !starterItems.includes(p)) : pool;
+    stacks[fillPositions[0]].push(starterItems[0]);
+    stacks[fillPositions[1]].push(starterItems[1]);
+    stacks[otherStarterCell].push(starterItems[2]);
 
-    occupied.forEach((cellIndex, i) => {
-      if (i < rest.length) stacks[cellIndex].push(rest[i]);
+    restOccupied.forEach((cellIndex, i) => {
+      if (i < pool.length) stacks[cellIndex].push(pool[i]);
     });
-    for (let i = occupied.length; i < rest.length; i++) {
-      const cellIndex = occupied[Math.floor(Math.random() * occupied.length)];
-      stacks[cellIndex].push(rest[i]);
-    }
-
-    if (starterItems) {
-      shuffle(occupied.slice()).slice(0, 3).forEach((cellIndex, i) => {
-        if (starterItems[i]) stacks[cellIndex].push(starterItems[i]);
-      });
+    for (let i = restOccupied.length; i < pool.length; i++) {
+      const cellIndex = restOccupied[Math.floor(Math.random() * restOccupied.length)];
+      stacks[cellIndex].push(pool[i]);
     }
 
     return stacks;
