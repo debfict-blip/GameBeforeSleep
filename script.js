@@ -294,6 +294,77 @@
     return item && item.group !== null && lockedGroups[item.group] !== undefined;
   }
 
+  // Every group contributes exactly 3 items of its type, and a group is
+  // always entirely locked or entirely unlocked (never split) — so the
+  // unlocked count of any given type on the board is always a multiple
+  // of 3. Finds every currently-unlocked instance of `type`, anywhere on
+  // the board (grid, at any depth — not just stack tops — plus belts).
+  function findUnlockedByType(type) {
+    const found = [];
+    shelf.forEach((stack, cellIndex) => {
+      stack.forEach((item, depthIndex) => {
+        if (item.type === type && !isLocked(item)) {
+          found.push({ kind: 'shelf', cellIndex, depthIndex, isTop: depthIndex === stack.length - 1 });
+        }
+      });
+    });
+    belts.forEach((belt, beltIndex) => {
+      belt.items.forEach((slot, slotIndex) => {
+        if (slot.item && slot.item.type === type) {
+          found.push({ kind: 'belt', beltIndex, slotIndex, isTop: true });
+        }
+      });
+    });
+    return found;
+  }
+
+  function locationRect(loc) {
+    if (loc.kind === 'shelf') {
+      const slotEl = shelfEl.children[loc.cellIndex];
+      return slotEl ? slotEl.getBoundingClientRect() : null;
+    }
+    const slot = belts[loc.beltIndex].items[loc.slotIndex];
+    return slot.el ? slot.el.getBoundingClientRect() : null;
+  }
+
+  function removeAtLocation(loc) {
+    if (loc.kind === 'shelf') {
+      shelf[loc.cellIndex].splice(loc.depthIndex, 1);
+    } else {
+      const slot = belts[loc.beltIndex].items[loc.slotIndex];
+      if (slot.el) slot.el.remove();
+      slot.item = null;
+      slot.el = null;
+    }
+  }
+
+  // The hammer clears a whole matching triple at once (the tapped item
+  // plus two more of the same type pulled from anywhere on the board —
+  // stack tops preferred for a cleaner pop, buried ones if that's all
+  // that's left) rather than a single item. Removing items one at a time
+  // would leave 1 or 2 stragglers of a type that can never line up into
+  // a 3-in-a-row again, softlocking the level.
+  function hammerClearType(type, tappedLoc) {
+    const rest = findUnlockedByType(type).filter(
+      (loc) => !(loc.kind === tappedLoc.kind
+        && loc.cellIndex === tappedLoc.cellIndex && loc.beltIndex === tappedLoc.beltIndex
+        && loc.depthIndex === tappedLoc.depthIndex && loc.slotIndex === tappedLoc.slotIndex)
+    );
+    rest.sort((a, b) => (b.isTop ? 1 : 0) - (a.isTop ? 1 : 0));
+    const toRemove = [tappedLoc, ...rest.slice(0, 2)];
+
+    const rects = toRemove.map(locationRect);
+    toRemove.forEach(removeAtLocation);
+
+    if (toRemove.length === 3) {
+      stars += 1;
+      save(KEYS.stars, stars);
+    }
+    rects.forEach((rect) => spawnPopGhost(rect, type));
+    const midRect = rects[1] || rects[0] || rects[2];
+    if (midRect) spawnStarFloat(midRect.left + midRect.width / 2, midRect.top);
+  }
+
   // FLIP-style motion: capture each item's on-screen position before a
   // state change, then after re-rendering, animate from the old position
   // to the new one so items glide instead of snapping.
@@ -419,16 +490,11 @@
     if (hammerActive) {
       e.preventDefault();
       const oldRects = captureRects();
-      const rect = el.getBoundingClientRect();
+      const tappedLoc = fromBelt
+        ? { kind: 'belt', beltIndex, slotIndex, isTop: true }
+        : { kind: 'shelf', cellIndex: index, depthIndex: shelf[index].length - 1, isTop: true };
       pushHistory();
-      if (fromBelt) {
-        const slot = belts[beltIndex].items[slotIndex];
-        slot.item = null;
-        slot.el.remove();
-        slot.el = null;
-      } else {
-        shelf[index].pop();
-      }
+      hammerClearType(top.type, tappedLoc);
       hammers -= 1;
       hammerActive = false;
       save(KEYS.hammers, hammers);
@@ -436,7 +502,6 @@
       checkWin();
       render();
       applyFlip(oldRects);
-      spawnPopGhost(rect, top.type);
       return;
     }
 
