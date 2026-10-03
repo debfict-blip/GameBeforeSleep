@@ -37,7 +37,6 @@
   // cell. Items further down are genuinely hidden — their type isn't
   // revealed until everything above them is cleared away.
   let shelf = [];
-  let lockedGroups = {}; // groupId -> star cost remaining to unlock
   let nextId = 1;
   let drag = null;
   let hammerActive = false;
@@ -45,8 +44,7 @@
   let history = [];
 
   // Each belt is a fixed-length loop of slots that scrolls right-to-left
-  // forever (never loses an unclaimed item — no hard fail state). Belts
-  // never carry locked items, so isLocked() is never checked on them.
+  // forever (never loses an unclaimed item — no hard fail state).
   // slot.baseX is the slot's position along the belt's own virtual track;
   // it gets bumped forward by a full lap once it scrolls off-screen, so
   // the loop is seamless without needing duplicate DOM elements.
@@ -94,9 +92,6 @@
   //    others and only surface once whatever's on top is cleared. Fewer
   //    empty cells (less slack) means less room to maneuver, so slack
   //    tapers from 6 down to a floor of 2 as levels rise.
-  // A few of the rarest groups start locked behind a star cost, but at
-  // least two groups are always left unlocked so a level can always earn
-  // enough stars, from its own clears alone, to pay for the rest.
   //
   // From level 5 on, some of a level's items ride conveyor belts instead
   // of sitting in the shelf: belts loop forever (an unclaimed item just
@@ -104,12 +99,10 @@
   // alongside the grid, and more of them stack in at higher levels.
   function levelConfig(level) {
     const groups = Math.min(6 + (level - 1) * 2, 50);
-    const maxLocked = Math.max(0, groups - 2);
-    const lockedCount = level >= 3 ? Math.min(1 + Math.floor((level - 3) / 4), maxLocked) : 0;
     const slack = Math.max(2, 6 - Math.floor((level - 1) / 3));
     const beltCount = level >= 5 ? Math.min(1 + Math.floor((level - 5) / 7), 3) : 0;
     const beltSpeed = Math.min(40 + level * 1.2, 90); // px/sec
-    return { groups, lockedCount, slack, beltCount, beltSpeed };
+    return { groups, slack, beltCount, beltSpeed };
   }
 
   // Builds groups rather than a flat item pool, and keeps each group's 3
@@ -119,43 +112,36 @@
   // (the same property the hammer fix relies on), and lets buildStacks
   // guarantee one whole group starts fully exposed on the grid.
   function buildGroups(level) {
-    const { groups, lockedCount } = levelConfig(level);
+    const { groups } = levelConfig(level);
     const list = [];
     for (let g = 0; g < groups; g++) {
-      const locked = g >= groups - lockedCount;
-      const rank = locked ? g - (groups - lockedCount) : -1;
-      const cost = locked ? 2 * (rank + 1) : null;
       const type = ITEM_ICONS[g % ITEM_ICONS.length];
       const items = [];
-      for (let s = 0; s < 3; s++) items.push({ type, group: locked ? g : null, cost });
-      list.push({ locked, items });
+      for (let s = 0; s < 3; s++) items.push({ type });
+      list.push({ items });
     }
     return shuffle(list);
   }
 
-  // Splits the level's groups into what rides the belts (always unlocked
-  // groups only, so nothing hidden-and-locked ends up somewhere it can't
-  // be unlocked from) and what gets distributed into the shelf — at least
-  // one unlocked group is always kept back for the grid, both so a level
-  // can still fund its own locks from its own clears, and so there's
-  // always a whole group available to guarantee exposed on the shelf.
+  // Splits the level's groups into what rides the belts and what gets
+  // distributed into the shelf — at least one group is always kept back
+  // for the grid, so there's always a whole group available to guarantee
+  // exposed on the shelf (see buildStacks).
   function splitPools(level) {
     const { beltCount } = levelConfig(level);
     const groupsList = buildGroups(level);
-    const unlockedGroups = groupsList.filter((g) => !g.locked);
-    const lockedGroups = groupsList.filter((g) => g.locked);
 
     const beltGroupCount = Math.min(
       Math.floor((beltCount * ITEMS_PER_BELT) / 3),
-      Math.max(0, unlockedGroups.length - 1)
+      Math.max(0, groupsList.length - 1)
     );
-    const beltGroups = unlockedGroups.slice(0, beltGroupCount);
-    const gridUnlockedGroups = unlockedGroups.slice(beltGroupCount);
+    const beltGroups = groupsList.slice(0, beltGroupCount);
+    const gridGroups = groupsList.slice(beltGroupCount);
 
     const beltItems = beltGroups.flatMap((g) => g.items);
-    const gridPool = shuffle(gridUnlockedGroups.concat(lockedGroups).flatMap((g) => g.items));
+    const gridPool = shuffle(gridGroups.flatMap((g) => g.items));
 
-    return { gridPool, beltItems, gridUnlockedGroups };
+    return { gridPool, beltItems, gridGroups };
   }
 
   // Distributes a shuffled item pool across occupied cells as stacks
@@ -216,7 +202,7 @@
         const p = items.shift();
         slots.push({
           baseX: s * BELT_SPACING,
-          item: p ? { id: nextId++, type: p.type, group: p.group } : null,
+          item: p ? { id: nextId++, type: p.type } : null,
           slotEl: null,
           itemEl: null,
         });
@@ -231,16 +217,10 @@
     save(KEYS.level, level);
     levelNumberEl.textContent = String(level);
 
-    const { gridPool, beltItems, gridUnlockedGroups } = splitPools(level);
-    const starterGroup = gridUnlockedGroups[Math.floor(Math.random() * gridUnlockedGroups.length)];
+    const { gridPool, beltItems, gridGroups } = splitPools(level);
+    const starterGroup = gridGroups[Math.floor(Math.random() * gridGroups.length)];
     const stacks = buildStacks(level, gridPool, starterGroup.items);
-    shelf = stacks.map((stack) => stack.map((p) => ({ id: nextId++, type: p.type, group: p.group })));
-    lockedGroups = {};
-    stacks.forEach((stack) => {
-      stack.forEach((p) => {
-        if (p.group !== null) lockedGroups[p.group] = p.cost;
-      });
-    });
+    shelf = stacks.map((stack) => stack.map((p) => ({ id: nextId++, type: p.type })));
 
     belts = buildBelts(level, beltItems);
     renderBelts();
@@ -343,20 +323,15 @@
     return stack.length ? stack[stack.length - 1] : null;
   }
 
-  function isLocked(item) {
-    return item && item.group !== null && lockedGroups[item.group] !== undefined;
-  }
-
-  // Every group contributes exactly 3 items of its type, and a group is
-  // always entirely locked or entirely unlocked (never split) — so the
-  // unlocked count of any given type on the board is always a multiple
-  // of 3. Finds every currently-unlocked instance of `type`, anywhere on
-  // the board (grid, at any depth — not just stack tops — plus belts).
-  function findUnlockedByType(type) {
+  // Every group contributes exactly 3 items of its type, so the count of
+  // any given type on the board is always a multiple of 3. Finds every
+  // instance of `type`, anywhere on the board (grid, at any depth — not
+  // just stack tops — plus belts).
+  function findByType(type) {
     const found = [];
     shelf.forEach((stack, cellIndex) => {
       stack.forEach((item, depthIndex) => {
-        if (item.type === type && !isLocked(item)) {
+        if (item.type === type) {
           found.push({ kind: 'shelf', cellIndex, depthIndex, isTop: depthIndex === stack.length - 1 });
         }
       });
@@ -398,7 +373,7 @@
   // would leave 1 or 2 stragglers of a type that can never line up into
   // a 3-in-a-row again, softlocking the level.
   function hammerClearType(type, tappedLoc) {
-    const rest = findUnlockedByType(type).filter(
+    const rest = findByType(type).filter(
       (loc) => !(loc.kind === tappedLoc.kind
         && loc.cellIndex === tappedLoc.cellIndex && loc.beltIndex === tappedLoc.beltIndex
         && loc.depthIndex === tappedLoc.depthIndex && loc.slotIndex === tappedLoc.slotIndex)
@@ -477,9 +452,7 @@
       slot.className = 'slot';
       slot.dataset.index = String(index);
       const top = topOf(stack);
-      if (top) {
-        slot.appendChild(isLocked(top) ? makeLockedEl(top, index) : makeItemEl(top, index, stack.length));
-      }
+      if (top) slot.appendChild(makeItemEl(top, index, stack.length));
       shelfEl.appendChild(slot);
     });
     updateHud();
@@ -500,34 +473,6 @@
     }
     el.addEventListener('pointerdown', onPointerDown);
     return el;
-  }
-
-  function makeLockedEl(item, index) {
-    const el = document.createElement('div');
-    el.className = 'item locked';
-    el.innerHTML = `<span class="lock-icon">🔒</span><span class="lock-cost">${lockedGroups[item.group]}⭐</span>`;
-    el.addEventListener('click', () => attemptUnlock(item.group, el));
-    return el;
-  }
-
-  function attemptUnlock(group, el) {
-    const cost = lockedGroups[group];
-    if (stars >= cost) {
-      stars -= cost;
-      save(KEYS.stars, stars);
-      delete lockedGroups[group];
-      render();
-      shelf.forEach((stack) => {
-        const top = topOf(stack);
-        if (top && top.group === group) {
-          const revealed = shelfEl.querySelector(`[data-id="${top.id}"]`);
-          if (revealed) revealed.classList.add('reveal-pop');
-        }
-      });
-    } else if (el) {
-      el.classList.add('shake');
-      setTimeout(() => el.classList.remove('shake'), 320);
-    }
   }
 
   function onPointerDown(e) {
@@ -629,14 +574,14 @@
   }
 
   // A move only ever drops the top item of a stack into a completely
-  // empty cell — never a direct swap, and never onto another stack even
-  // if it's unlocked. That scarcity of empty cells, combined with items
-  // being physically hidden until uncovered, is the whole puzzle.
+  // empty cell — never a direct swap onto another stack. That scarcity
+  // of empty cells, combined with items being physically hidden until
+  // uncovered, is the whole puzzle.
   function attemptMove(sourceIndex, targetIndex) {
     if (sourceIndex === targetIndex) return;
     if (shelf[targetIndex].length > 0) return; // target must be a genuinely empty cell
     const top = topOf(shelf[sourceIndex]);
-    if (!top || isLocked(top)) return;
+    if (!top) return;
 
     pushHistory();
     shelf[targetIndex].push(shelf[sourceIndex].pop());
@@ -672,7 +617,7 @@
         const rowEnd = Math.min(rowStart + COLS, shelf.length);
         for (let i = rowStart; i <= rowEnd - 3; i++) {
           const a = topOf(shelf[i]), b = topOf(shelf[i + 1]), c = topOf(shelf[i + 2]);
-          if (a && b && c && !isLocked(a) && !isLocked(b) && !isLocked(c) && a.type === b.type && c.type === b.type) {
+          if (a && b && c && a.type === b.type && c.type === b.type) {
             // Grab the slot rects before rendering wipes this frame's DOM, so
             // the clear pop appears exactly where the trio was sitting.
             const rects = [i, i + 1, i + 2].map((idx) => {

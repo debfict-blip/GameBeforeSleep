@@ -277,44 +277,6 @@ body {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
 
-.item.locked {
-  flex-direction: column;
-  gap: 2px;
-  background: rgba(0, 0, 0, 0.22);
-  border-style: dashed;
-  box-shadow: none;
-  cursor: pointer;
-}
-
-.lock-icon {
-  font-size: 0.8em;
-}
-
-.lock-cost {
-  font-size: 0.32em;
-  font-weight: 700;
-  color: var(--accent);
-}
-
-.item.locked.shake {
-  animation: shake 0.32s ease-in-out;
-}
-
-.item.reveal-pop {
-  animation: reveal-pop 0.32s cubic-bezier(0.34, 1.56, 0.64, 1);
-}
-
-@keyframes shake {
-  0%, 100% { transform: translateX(0); }
-  25% { transform: translateX(-4px); }
-  75% { transform: translateX(4px); }
-}
-
-@keyframes reveal-pop {
-  0% { transform: scale(0.55); opacity: 0.4; }
-  100% { transform: scale(1); opacity: 1; }
-}
-
 .drag-ghost {
   position: fixed;
   top: 0;
