@@ -591,17 +591,14 @@
     const oldRects = captureRects();
     const dropTarget = document.elementFromPoint(e.clientX, e.clientY);
     const shelfSlotEl = dropTarget && dropTarget.closest('.shelf .slot');
-    const beltSlotEl = dropTarget && dropTarget.closest('.beltSlot');
 
     if (shelfSlotEl) {
       const targetIndex = Number(shelfSlotEl.dataset.index);
       if (drag.source === 'belt') attemptMoveFromBelt(drag.beltIndex, drag.slotIndex, targetIndex);
       else attemptMove(drag.sourceIndex, targetIndex);
-    } else if (beltSlotEl && drag.source === 'grid') {
-      const targetBeltIndex = Number(beltSlotEl.dataset.beltIndex);
-      const targetSlotIndex = Number(beltSlotEl.dataset.slotIndex);
-      attemptMoveToBelt(drag.sourceIndex, targetBeltIndex, targetSlotIndex);
     }
+    // Belt slots (empty or not) are never a valid drop target — items only
+    // ever come off a belt, never get parked back onto one.
 
     endDrag(oldRects);
   }
@@ -661,27 +658,6 @@
     shelf[targetIndex].push(slot.item);
     slot.item = null;
     if (slot.itemEl) { slot.itemEl.remove(); slot.itemEl = null; }
-
-    moves += 1;
-    resolveTriples();
-    checkWin();
-  }
-
-  // The reverse direction: park a shelf item onto an empty, currently
-  // passing belt slot. It's an extra scratch space beyond the shelf's
-  // own empty cells, but a risky one — once parked, it keeps moving and
-  // has to be caught again later, unlike a shelf cell which just waits.
-  function attemptMoveToBelt(sourceIndex, beltIndex, slotIndex) {
-    const slot = belts[beltIndex].items[slotIndex];
-    if (!slot || slot.item) return; // target must be a genuinely empty belt slot
-    const top = topOf(shelf[sourceIndex]);
-    if (!top || isLocked(top)) return;
-
-    pushHistory();
-    shelf[sourceIndex].pop();
-    slot.item = top;
-    slot.itemEl = makeBeltItemEl(top, beltIndex, slotIndex);
-    slot.slotEl.appendChild(slot.itemEl);
 
     moves += 1;
     resolveTriples();
