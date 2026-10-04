@@ -1,14 +1,12 @@
 (() => {
   const ITEM_ICONS = ['🍎', '🥐', '🧀', '🥛', '🍫', '🥕', '🧃', '🍞', '🥚', '🍯', '🧻', '🥫'];
-  const COLS = 6; // must match .shelf's grid-template-columns in style.css
-  const CELLS = 24; // fixed visible board size (4 rows x 6 cols) regardless of level
+  const COLS = 6; // width of every row, static or moving
   const HISTORY_LIMIT = 20;
   const START_HAMMERS = 2;
   const START_UNDOS = 2;
-  const ITEMS_PER_BELT = 7;
-  const BELT_ITEM_SIZE = 48;
-  const BELT_GAP = 16;
-  const BELT_SPACING = BELT_ITEM_SIZE + BELT_GAP; // px between consecutive belt slots
+  const SLOT_SIZE = 46;
+  const SLOT_GAP = 16;
+  const ROW_SPACING = SLOT_SIZE + SLOT_GAP; // px between consecutive slots in a moving row
 
   const KEYS = {
     level: 'gbs-level',
@@ -30,27 +28,33 @@
   const restartBtn = document.getElementById('restartBtn');
   const nextLevelBtn = document.getElementById('nextLevelBtn');
   const fxLayer = document.getElementById('fxLayer');
-  const beltsSectionEl = document.getElementById('beltsSection');
 
-  // shelf[i] is a STACK (array) of item objects, back-to-front; the last
-  // element is the visible, draggable top. An empty array means an empty
-  // cell. Items further down are genuinely hidden — their type isn't
-  // revealed until everything above them is cleared away.
-  let shelf = [];
+  // The board is an ordered array of rows (top to bottom), each either
+  // static or moving. Every row has `cells`, length COLS, and every cell
+  // is a STACK (array of item objects, back-to-front — the last element
+  // is the visible, draggable top; empty array means an empty cell).
+  // Items further down a stack are genuinely hidden until uncovered.
+  //
+  // Static row:  { moving: false, index, rowEl, cells: [{stack}, ...] }
+  // Moving row:  { moving: true, index, speed, offset,
+  //                cells: [{stack, baseX, slotEl, itemEl}, ...] }
+  //
+  // Moving rows scroll right-to-left forever (an uncaught item just
+  // comes back around, never lost) using the same lap-tracking technique
+  // as before: cell.baseX is the slot's position along its own virtual
+  // track, bumped forward by a full lap once it scrolls off-screen, so
+  // the loop is seamless without duplicate DOM elements. They're a pure
+  // source/sink though — 3-in-a-row matching only ever resolves on
+  // static rows, never mid-scroll, so "what's adjacent" is never
+  // ambiguous.
+  let board = [];
   let nextId = 1;
   let drag = null;
   let hammerActive = false;
   let moves = 0;
   let history = [];
-
-  // Each belt is a fixed-length loop of slots that scrolls right-to-left
-  // forever (never loses an unclaimed item — no hard fail state).
-  // slot.baseX is the slot's position along the belt's own virtual track;
-  // it gets bumped forward by a full lap once it scrolls off-screen, so
-  // the loop is seamless without needing duplicate DOM elements.
-  let belts = [];
-  let beltAnimHandle = null;
-  let beltLastTs = null;
+  let boardAnimHandle = null;
+  let boardLastTs = null;
 
   let currentLevel = loadInt(KEYS.level, 1);
   let stars = loadInt(KEYS.stars, 0);
@@ -80,37 +84,35 @@
     return arr;
   }
 
-  // Difficulty ramps along two axes at once:
+  // Difficulty ramps along several axes at once:
   //  - `groups`: how many 3-item stacks-worth of stock exist in total
   //    (types repeat once past the icon set — several separate stacks of
-  //    the "same product" is normal for a real shelf). This climbs from 6
-  //    groups (18 items) at level 1 toward 50 groups (150 items) by the
-  //    time variety and restocking both cap out.
-  //  - `slack`: how many of the fixed CELLS visible positions start
-  //    completely empty. Occupied cells split the remaining items into
-  //    randomly-sized stacks, so most items start hidden underneath
-  //    others and only surface once whatever's on top is cleared. Fewer
-  //    empty cells (less slack) means less room to maneuver, so slack
+  //    the "same product" is normal for a real shelf). Climbs from 6
+  //    groups (18 items) at level 1 toward 50 groups (150 items).
+  //  - `slack`: how many of a level's static cells start completely
+  //    empty. Fewer empty cells means less room to maneuver, so slack
   //    tapers from 6 down to a floor of 2 as levels rise.
-  //
-  // From level 5 on, some of a level's items ride conveyor belts instead
-  // of sitting in the shelf: belts loop forever (an unclaimed item just
-  // comes back around, never lost) but they're a second thing to track
-  // alongside the grid, and more of them stack in at higher levels.
+  //  - `totalRows` / `movingRowCount`: the board itself isn't fixed —
+  //    it starts at a plain 4-row shelf, grows a little as levels rise
+  //    (more surface for the growing item count), and from level 5 on,
+  //    some of those rows scroll instead of sitting still. More rows
+  //    move, and faster, at higher levels — at least 2 rows always stay
+  //    static, so there's always a place for matches to actually happen.
   function levelConfig(level) {
     const groups = Math.min(6 + (level - 1) * 2, 50);
     const slack = Math.max(2, 6 - Math.floor((level - 1) / 3));
-    const beltCount = level >= 5 ? Math.min(1 + Math.floor((level - 5) / 7), 3) : 0;
-    const beltSpeed = Math.min(40 + level * 1.2, 90); // px/sec
-    return { groups, slack, beltCount, beltSpeed };
+    const totalRows = level < 5 ? 4 : Math.min(4 + Math.floor((level - 5) / 10), 6);
+    const movingRowCount = level < 5 ? 0 : Math.min(1 + Math.floor((level - 5) / 8), totalRows - 2);
+    const rowSpeed = Math.min(40 + level * 1.2, 90); // px/sec
+    return { groups, slack, totalRows, movingRowCount, rowSpeed };
   }
 
   // Builds groups rather than a flat item pool, and keeps each group's 3
   // items together through shuffling — that's what lets splitPools hand
-  // belts and the grid whole groups instead of an arbitrary item count,
-  // which keeps every type's count a clean multiple of 3 in *both* places
-  // (the same property the hammer fix relies on), and lets buildStacks
-  // guarantee one whole group starts fully exposed on the grid.
+  // moving rows and the grid whole groups instead of an arbitrary item
+  // count, which keeps every type's count a clean multiple of 3 in
+  // *both* places (the same property the hammer fix relies on), and
+  // lets buildStaticRows guarantee one whole group starts fully exposed.
   function buildGroups(level) {
     const { groups } = levelConfig(level);
     const list = [];
@@ -123,28 +125,26 @@
     return shuffle(list);
   }
 
-  // Splits the level's groups into what rides the belts and what gets
-  // distributed into the shelf — at least one group is always kept back
-  // for the grid, so there's always a whole group available to guarantee
-  // exposed on the shelf (see buildStacks).
+  // Splits the level's groups into what rides the moving rows and what
+  // gets distributed into the static rows — at least one group is always
+  // kept back for the static side, so there's always a whole group
+  // available to guarantee exposed there (see buildStaticRows).
   function splitPools(level) {
-    const { beltCount } = levelConfig(level);
+    const { movingRowCount } = levelConfig(level);
     const groupsList = buildGroups(level);
 
-    const beltGroupCount = Math.min(
-      Math.floor((beltCount * ITEMS_PER_BELT) / 3),
-      Math.max(0, groupsList.length - 1)
-    );
-    const beltGroups = groupsList.slice(0, beltGroupCount);
-    const gridGroups = groupsList.slice(beltGroupCount);
+    const movingCapacity = movingRowCount * COLS;
+    const movingGroupCount = Math.min(Math.floor(movingCapacity / 3), Math.max(0, groupsList.length - 1));
+    const movingGroups = groupsList.slice(0, movingGroupCount);
+    const gridGroups = groupsList.slice(movingGroupCount);
 
-    const beltItems = beltGroups.flatMap((g) => g.items);
+    const movingItems = movingGroups.flatMap((g) => g.items);
     const gridPool = shuffle(gridGroups.flatMap((g) => g.items));
 
-    return { gridPool, beltItems, gridGroups };
+    return { gridPool, movingItems, gridGroups };
   }
 
-  // Distributes a shuffled item pool across occupied cells as stacks
+  // Distributes a shuffled item pool across the static rows' cells
   // (every occupied cell gets at least one item, then extras land on
   // random occupied cells, producing naturally uneven pile heights) —
   // except for four cells reserved up front to guarantee a genuinely
@@ -152,64 +152,77 @@
   //
   // Being merely visible isn't enough: if every spare copy of that type
   // is buried under something else, completing the triple still forces
-  // a reveal somewhere. So the reservation is stricter — pick a row and
-  // a 3-column window in it; two of those three cells get two of
+  // a reveal somewhere. So the reservation is stricter — pick a static
+  // row and a 3-column window in it; two of those three cells get two of
   // `starterItems` with NOTHING else ever placed on top (depth exactly
   // 1), and the third window cell is left as one of the level's empty
   // slots. The third starter item goes alone (also depth 1) in some
-  // other cell entirely. The player can always finish this exact triple
-  // with a single drag into that one empty slot, using two items that
-  // have nothing hidden under them and disturbing nothing else.
-  function buildStacks(level, pool, starterItems) {
+  // other static cell entirely. The player can always finish this exact
+  // triple with a single drag into that one empty slot, using two items
+  // that have nothing hidden under them and disturbing nothing else.
+  function buildStaticRows(level, pool, starterItems, staticRowCount) {
     const { slack } = levelConfig(level);
-    const allCells = [...Array(CELLS).keys()];
 
-    const row = Math.floor(Math.random() * (CELLS / COLS));
+    const guaranteeRow = Math.floor(Math.random() * staticRowCount);
     const col = Math.floor(Math.random() * (COLS - 2)); // 0..COLS-3: a valid 3-wide window
-    const windowCells = [row * COLS + col, row * COLS + col + 1, row * COLS + col + 2];
-    const emptyPos = windowCells[Math.floor(Math.random() * 3)];
-    const fillPositions = windowCells.filter((p) => p !== emptyPos);
+    const windowCols = [col, col + 1, col + 2];
+    const emptyCol = windowCols[Math.floor(Math.random() * 3)];
+    const fillCols = windowCols.filter((c) => c !== emptyCol);
 
-    const remaining = shuffle(allCells.filter((p) => !windowCells.includes(p)));
-    const otherStarterCell = remaining.pop();
+    const allPositions = [];
+    for (let r = 0; r < staticRowCount; r++) {
+      for (let c = 0; c < COLS; c++) {
+        if (r === guaranteeRow && windowCols.includes(c)) continue;
+        allPositions.push({ row: r, col: c });
+      }
+    }
+    const remaining = shuffle(allPositions);
+    const otherStarterPos = remaining.pop();
     const restOccupied = remaining.slice(slack - 1); // remaining.slice(0, slack - 1) stay empty
 
-    const stacks = Array.from({ length: CELLS }, () => []);
-    stacks[fillPositions[0]].push(starterItems[0]);
-    stacks[fillPositions[1]].push(starterItems[1]);
-    stacks[otherStarterCell].push(starterItems[2]);
+    const rows = Array.from({ length: staticRowCount }, () => ({
+      moving: false,
+      cells: Array.from({ length: COLS }, () => ({ stack: [] })),
+    }));
 
-    restOccupied.forEach((cellIndex, i) => {
-      if (i < pool.length) stacks[cellIndex].push(pool[i]);
+    rows[guaranteeRow].cells[fillCols[0]].stack.push(starterItems[0]);
+    rows[guaranteeRow].cells[fillCols[1]].stack.push(starterItems[1]);
+    rows[otherStarterPos.row].cells[otherStarterPos.col].stack.push(starterItems[2]);
+
+    restOccupied.forEach((pos, i) => {
+      if (i < pool.length) rows[pos.row].cells[pos.col].stack.push(pool[i]);
     });
     for (let i = restOccupied.length; i < pool.length; i++) {
-      const cellIndex = restOccupied[Math.floor(Math.random() * restOccupied.length)];
-      stacks[cellIndex].push(pool[i]);
+      const pos = restOccupied[Math.floor(Math.random() * restOccupied.length)];
+      rows[pos.row].cells[pos.col].stack.push(pool[i]);
     }
 
-    return stacks;
+    return rows;
   }
 
-  // Lays beltItems out evenly across `beltCount` belts, ITEMS_PER_BELT
-  // slots each (unused trailing slots on the last belt stay empty).
-  function buildBelts(level, beltItems) {
-    const { beltCount, beltSpeed } = levelConfig(level);
-    const items = shuffle(beltItems.slice());
-    const result = [];
-    for (let b = 0; b < beltCount; b++) {
-      const slots = [];
-      for (let s = 0; s < ITEMS_PER_BELT; s++) {
+  // Lays movingItems out evenly across `movingRowCount` rows, COLS slots
+  // each (unused trailing slots stay empty). Moving-row slots hold at
+  // most one item apiece — hidden depth stays a static-row-only concept
+  // for now, so catching something off a moving row is a pure timing
+  // puzzle without also gambling on what's underneath it.
+  function buildMovingRows(level, movingItems, movingRowCount) {
+    const { rowSpeed } = levelConfig(level);
+    const items = shuffle(movingItems.slice());
+    const rows = [];
+    for (let r = 0; r < movingRowCount; r++) {
+      const cells = [];
+      for (let c = 0; c < COLS; c++) {
         const p = items.shift();
-        slots.push({
-          baseX: s * BELT_SPACING,
-          item: p ? { id: nextId++, type: p.type } : null,
+        cells.push({
+          stack: p ? [{ id: nextId++, type: p.type }] : [],
+          baseX: c * ROW_SPACING,
           slotEl: null,
           itemEl: null,
         });
       }
-      result.push({ speed: beltSpeed, offset: 0, trackEl: null, items: slots });
+      rows.push({ moving: true, speed: rowSpeed, offset: 0, cells });
     }
-    return result;
+    return rows;
   }
 
   function newLevel(level) {
@@ -217,96 +230,139 @@
     save(KEYS.level, level);
     levelNumberEl.textContent = String(level);
 
-    const { gridPool, beltItems, gridGroups } = splitPools(level);
-    const starterGroup = gridGroups[Math.floor(Math.random() * gridGroups.length)];
-    const stacks = buildStacks(level, gridPool, starterGroup.items);
-    shelf = stacks.map((stack) => stack.map((p) => ({ id: nextId++, type: p.type })));
+    const { totalRows, movingRowCount } = levelConfig(level);
+    const staticRowCount = totalRows - movingRowCount;
 
-    belts = buildBelts(level, beltItems);
-    renderBelts();
+    const { gridPool, movingItems, gridGroups } = splitPools(level);
+    const starterGroup = gridGroups[Math.floor(Math.random() * gridGroups.length)];
+    const staticRows = buildStaticRows(level, gridPool, starterGroup.items, staticRowCount);
+    const movingRows = buildMovingRows(level, movingItems, movingRowCount);
+
+    // Scatter the moving rows among the static ones (not clumped) so
+    // which rows move varies level to level.
+    const positions = shuffle([...Array(totalRows).keys()]);
+    const movingPositions = new Set(positions.slice(0, movingRowCount));
+
+    board = [];
+    let si = 0;
+    let mi = 0;
+    for (let i = 0; i < totalRows; i++) {
+      const row = movingPositions.has(i) ? movingRows[mi++] : staticRows[si++];
+      row.index = i;
+      board.push(row);
+    }
 
     moves = 0;
     history = [];
     hammerActive = false;
     winOverlay.classList.add('hidden');
-    render(); // lay out real slot elements first, so resolveTriples can read their rects
+    renderBoard(); // lay out real row/slot elements first, so resolveTriples can read their rects
     resolveTriples(); // a fresh shuffle can spawn a triple by pure chance; clear it up front
     updateHud();
-    render();
-    startBeltLoop();
+    renderStaticRows();
+    startBoardLoop();
   }
 
-  function renderBelts() {
-    beltsSectionEl.innerHTML = '';
-    beltsSectionEl.classList.toggle('hidden', belts.length === 0);
-    if (belts.length === 0) return;
+  function renderBoard() {
+    shelfEl.innerHTML = '';
+    board.forEach((row) => {
+      if (row.moving) {
+        row.rowEl = buildMovingRowEl(row);
+      } else {
+        row.rowEl = document.createElement('div');
+        renderStaticRowInto(row);
+      }
+      shelfEl.appendChild(row.rowEl);
+    });
+    updateHud();
+  }
 
-    const label = document.createElement('span');
-    label.className = 'sectionLabel';
-    label.textContent = belts.length > 1 ? 'Delivery Belts' : 'Delivery Belt';
-    beltsSectionEl.appendChild(label);
+  // Only re-renders static rows — moving rows are left completely alone
+  // so their persistent, continuously-animated DOM never gets torn down
+  // by an unrelated move elsewhere on the board.
+  function renderStaticRows() {
+    board.forEach((row) => {
+      if (!row.moving) renderStaticRowInto(row);
+    });
+    updateHud();
+  }
 
-    belts.forEach((belt, beltIndex) => {
-      const track = document.createElement('div');
-      track.className = 'beltTrack';
-      belt.trackEl = track;
-      // Every slot gets a moving wrapper — occupied or not — so an empty
-      // slot is itself a visible, catchable-up-with drop target as it
-      // scrolls past, not just dead space between items.
-      belt.items.forEach((slot, slotIndex) => {
-        const slotEl = document.createElement('div');
-        slotEl.className = 'beltSlot';
-        slotEl.dataset.beltIndex = String(beltIndex);
-        slotEl.dataset.slotIndex = String(slotIndex);
-        slot.slotEl = slotEl;
-        slot.itemEl = slot.item ? makeBeltItemEl(slot.item, beltIndex, slotIndex) : null;
-        if (slot.itemEl) slotEl.appendChild(slot.itemEl);
-        track.appendChild(slotEl);
-      });
-      beltsSectionEl.appendChild(track);
+  function renderStaticRowInto(row) {
+    row.rowEl.className = 'shelfRow static';
+    row.rowEl.innerHTML = '';
+    row.cells.forEach((cell, col) => {
+      const slot = document.createElement('div');
+      slot.className = 'slot';
+      slot.dataset.row = String(row.index);
+      slot.dataset.col = String(col);
+      const top = topOf(cell.stack);
+      if (top) slot.appendChild(makeItemEl(top, row.index, col, cell.stack.length, false));
+      row.rowEl.appendChild(slot);
     });
   }
 
-  function makeBeltItemEl(item, beltIndex, slotIndex) {
+  function buildMovingRowEl(row) {
     const el = document.createElement('div');
-    el.className = 'item belt-item';
+    el.className = 'shelfRow moving';
+    row.cells.forEach((cell, col) => {
+      const slotEl = document.createElement('div');
+      slotEl.className = 'beltSlot';
+      slotEl.dataset.row = String(row.index);
+      slotEl.dataset.col = String(col);
+      cell.slotEl = slotEl;
+      const top = topOf(cell.stack);
+      cell.itemEl = top ? makeItemEl(top, row.index, col, cell.stack.length, true) : null;
+      if (cell.itemEl) slotEl.appendChild(cell.itemEl);
+      el.appendChild(slotEl);
+    });
+    return el;
+  }
+
+  function makeItemEl(item, rowIndex, col, depth, isMoving) {
+    const el = document.createElement('div');
+    el.className = isMoving ? 'item belt-item' : 'item';
     el.textContent = item.type;
-    el.dataset.source = 'belt';
-    el.dataset.beltIndex = String(beltIndex);
-    el.dataset.slotIndex = String(slotIndex);
+    el.dataset.row = String(rowIndex);
+    el.dataset.col = String(col);
     el.dataset.id = String(item.id);
+    if (depth > 1) {
+      const badge = document.createElement('span');
+      badge.className = 'depth-badge';
+      badge.textContent = String(depth);
+      el.appendChild(badge);
+    }
     el.addEventListener('pointerdown', onPointerDown);
     return el;
   }
 
-  function startBeltLoop() {
-    if (beltAnimHandle !== null) return; // already running
-    beltLastTs = null;
+  function startBoardLoop() {
+    if (boardAnimHandle !== null) return; // already running
+    boardLastTs = null;
     const step = (ts) => {
-      if (beltLastTs === null) beltLastTs = ts;
-      const dt = (ts - beltLastTs) / 1000;
-      beltLastTs = ts;
+      if (boardLastTs === null) boardLastTs = ts;
+      const dt = (ts - boardLastTs) / 1000;
+      boardLastTs = ts;
 
-      belts.forEach((belt, beltIndex) => {
-        belt.offset += belt.speed * dt;
-        const trackLength = ITEMS_PER_BELT * BELT_SPACING;
-        belt.items.forEach((slot, idx) => {
-          if (!slot.slotEl) return;
-          // Freeze the slot currently being dragged (from OR to) — its
-          // ghost, or the target highlight, represents it while it moves.
-          if (drag && drag.source === 'belt' && drag.beltIndex === beltIndex && drag.slotIndex === idx) return;
-          let x = slot.baseX - belt.offset;
-          if (x < -BELT_ITEM_SIZE) {
-            slot.baseX += trackLength;
-            x = slot.baseX - belt.offset;
+      board.forEach((row) => {
+        if (!row.moving) return;
+        row.offset += row.speed * dt;
+        const trackLength = COLS * ROW_SPACING;
+        row.cells.forEach((cell, col) => {
+          if (!cell.slotEl) return;
+          // Freeze the slot currently being dragged — its ghost represents it now.
+          if (drag && drag.rowIndex === row.index && drag.col === col) return;
+          let x = cell.baseX - row.offset;
+          if (x < -SLOT_SIZE) {
+            cell.baseX += trackLength;
+            x = cell.baseX - row.offset;
           }
-          slot.slotEl.style.transform = `translateX(${x}px)`;
+          cell.slotEl.style.transform = `translateX(${x}px)`;
         });
       });
 
-      beltAnimHandle = requestAnimationFrame(step);
+      boardAnimHandle = requestAnimationFrame(step);
     };
-    beltAnimHandle = requestAnimationFrame(step);
+    boardAnimHandle = requestAnimationFrame(step);
   }
 
   function updateHud() {
@@ -325,44 +381,41 @@
 
   // Every group contributes exactly 3 items of its type, so the count of
   // any given type on the board is always a multiple of 3. Finds every
-  // instance of `type`, anywhere on the board (grid, at any depth — not
-  // just stack tops — plus belts).
+  // instance of `type`, anywhere on the board (any row, any depth — not
+  // just visible tops).
   function findByType(type) {
     const found = [];
-    shelf.forEach((stack, cellIndex) => {
-      stack.forEach((item, depthIndex) => {
-        if (item.type === type) {
-          found.push({ kind: 'shelf', cellIndex, depthIndex, isTop: depthIndex === stack.length - 1 });
-        }
-      });
-    });
-    belts.forEach((belt, beltIndex) => {
-      belt.items.forEach((slot, slotIndex) => {
-        if (slot.item && slot.item.type === type) {
-          found.push({ kind: 'belt', beltIndex, slotIndex, isTop: true });
-        }
+    board.forEach((row, rowIndex) => {
+      row.cells.forEach((cell, col) => {
+        cell.stack.forEach((item, depthIndex) => {
+          if (item.type === type) {
+            found.push({ rowIndex, col, depthIndex, isTop: depthIndex === cell.stack.length - 1 });
+          }
+        });
       });
     });
     return found;
   }
 
   function locationRect(loc) {
-    if (loc.kind === 'shelf') {
-      const slotEl = shelfEl.children[loc.cellIndex];
-      return slotEl ? slotEl.getBoundingClientRect() : null;
+    const row = board[loc.rowIndex];
+    const cell = row.cells[loc.col];
+    if (row.moving) {
+      return cell.itemEl ? cell.itemEl.getBoundingClientRect() : null;
     }
-    const slot = belts[loc.beltIndex].items[loc.slotIndex];
-    return slot.itemEl ? slot.itemEl.getBoundingClientRect() : null;
+    const slotEl = row.rowEl.children[loc.col];
+    return slotEl ? slotEl.getBoundingClientRect() : null;
   }
 
   function removeAtLocation(loc) {
-    if (loc.kind === 'shelf') {
-      shelf[loc.cellIndex].splice(loc.depthIndex, 1);
+    const row = board[loc.rowIndex];
+    const cell = row.cells[loc.col];
+    if (row.moving) {
+      if (cell.itemEl) cell.itemEl.remove();
+      cell.itemEl = null;
+      cell.stack.pop();
     } else {
-      const slot = belts[loc.beltIndex].items[loc.slotIndex];
-      if (slot.itemEl) slot.itemEl.remove();
-      slot.item = null;
-      slot.itemEl = null;
+      cell.stack.splice(loc.depthIndex, 1);
     }
   }
 
@@ -374,9 +427,7 @@
   // a 3-in-a-row again, softlocking the level.
   function hammerClearType(type, tappedLoc) {
     const rest = findByType(type).filter(
-      (loc) => !(loc.kind === tappedLoc.kind
-        && loc.cellIndex === tappedLoc.cellIndex && loc.beltIndex === tappedLoc.beltIndex
-        && loc.depthIndex === tappedLoc.depthIndex && loc.slotIndex === tappedLoc.slotIndex)
+      (loc) => !(loc.rowIndex === tappedLoc.rowIndex && loc.col === tappedLoc.col && loc.depthIndex === tappedLoc.depthIndex)
     );
     rest.sort((a, b) => (b.isTop ? 1 : 0) - (a.isTop ? 1 : 0));
     const toRemove = [tappedLoc, ...rest.slice(0, 2)];
@@ -445,52 +496,20 @@
     setTimeout(() => el.remove(), 750);
   }
 
-  function render() {
-    shelfEl.innerHTML = '';
-    shelf.forEach((stack, index) => {
-      const slot = document.createElement('div');
-      slot.className = 'slot';
-      slot.dataset.index = String(index);
-      const top = topOf(stack);
-      if (top) slot.appendChild(makeItemEl(top, index, stack.length));
-      shelfEl.appendChild(slot);
-    });
-    updateHud();
-  }
-
-  function makeItemEl(item, index, depth) {
-    const el = document.createElement('div');
-    el.className = 'item';
-    el.textContent = item.type;
-    el.dataset.source = 'grid';
-    el.dataset.index = String(index);
-    el.dataset.id = String(item.id);
-    if (depth > 1) {
-      const badge = document.createElement('span');
-      badge.className = 'depth-badge';
-      badge.textContent = String(depth);
-      el.appendChild(badge);
-    }
-    el.addEventListener('pointerdown', onPointerDown);
-    return el;
-  }
-
   function onPointerDown(e) {
     if (drag) return;
     const el = e.currentTarget;
-    const fromBelt = el.dataset.source === 'belt';
-    const beltIndex = fromBelt ? Number(el.dataset.beltIndex) : null;
-    const slotIndex = fromBelt ? Number(el.dataset.slotIndex) : null;
-    const index = fromBelt ? null : Number(el.dataset.index);
-    const top = fromBelt ? belts[beltIndex].items[slotIndex].item : topOf(shelf[index]);
+    const rowIndex = Number(el.dataset.row);
+    const col = Number(el.dataset.col);
+    const row = board[rowIndex];
+    const cell = row.cells[col];
+    const top = topOf(cell.stack);
     if (!top) return;
 
     if (hammerActive) {
       e.preventDefault();
       const oldRects = captureRects();
-      const tappedLoc = fromBelt
-        ? { kind: 'belt', beltIndex, slotIndex, isTop: true }
-        : { kind: 'shelf', cellIndex: index, depthIndex: shelf[index].length - 1, isTop: true };
+      const tappedLoc = { rowIndex, col, depthIndex: cell.stack.length - 1 };
       pushHistory();
       hammerClearType(top.type, tappedLoc);
       hammers -= 1;
@@ -498,7 +517,7 @@
       save(KEYS.hammers, hammers);
       resolveTriples();
       checkWin();
-      render();
+      renderStaticRows();
       applyFlip(oldRects);
       return;
     }
@@ -515,9 +534,7 @@
 
     el.classList.add('dragging-source');
 
-    drag = fromBelt
-      ? { pointerId: e.pointerId, source: 'belt', beltIndex, slotIndex, el, ghost }
-      : { pointerId: e.pointerId, source: 'grid', sourceIndex: index, el, ghost };
+    drag = { pointerId: e.pointerId, rowIndex, col, el, ghost };
 
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerup', onPointerUp);
@@ -535,15 +552,17 @@
 
     const oldRects = captureRects();
     const dropTarget = document.elementFromPoint(e.clientX, e.clientY);
-    const shelfSlotEl = dropTarget && dropTarget.closest('.shelf .slot');
+    // Only static cells (.slot) are valid drop targets — moving-row
+    // slots (.beltSlot) are a different class, so they're never matched
+    // here: items only ever come off a moving row, never get parked
+    // back onto one.
+    const slotEl = dropTarget && dropTarget.closest('.slot');
 
-    if (shelfSlotEl) {
-      const targetIndex = Number(shelfSlotEl.dataset.index);
-      if (drag.source === 'belt') attemptMoveFromBelt(drag.beltIndex, drag.slotIndex, targetIndex);
-      else attemptMove(drag.sourceIndex, targetIndex);
+    if (slotEl) {
+      const targetRow = Number(slotEl.dataset.row);
+      const targetCol = Number(slotEl.dataset.col);
+      attemptMove(drag.rowIndex, drag.col, targetRow, targetCol);
     }
-    // Belt slots (empty or not) are never a valid drop target — items only
-    // ever come off a belt, never get parked back onto one.
 
     endDrag(oldRects);
   }
@@ -560,14 +579,13 @@
     window.removeEventListener('pointerup', onPointerUp);
     window.removeEventListener('pointercancel', onPointerCancel);
     drag = null;
-    render();
+    renderStaticRows();
     applyFlip(oldRects);
   }
 
   function pushHistory() {
     history.push({
-      shelf: shelf.map((stack) => stack.map((item) => ({ ...item }))),
-      belts: belts.map((belt) => belt.items.map((slot) => (slot.item ? { ...slot.item } : null))),
+      rows: board.map((row) => row.cells.map((cell) => cell.stack.map((item) => ({ ...item })))),
       moves,
     });
     if (history.length > HISTORY_LIMIT) history.shift();
@@ -576,33 +594,26 @@
   // A move only ever drops the top item of a stack into a completely
   // empty cell — never a direct swap onto another stack. That scarcity
   // of empty cells, combined with items being physically hidden until
-  // uncovered, is the whole puzzle.
-  function attemptMove(sourceIndex, targetIndex) {
-    if (sourceIndex === targetIndex) return;
-    if (shelf[targetIndex].length > 0) return; // target must be a genuinely empty cell
-    const top = topOf(shelf[sourceIndex]);
+  // uncovered, is the whole puzzle. The source can be a static cell or a
+  // moving-row slot; the target is always static (moving slots are never
+  // valid drop targets, enforced in onPointerUp).
+  function attemptMove(sourceRow, sourceCol, targetRow, targetCol) {
+    const target = board[targetRow].cells[targetCol];
+    if (target.stack.length > 0) return; // target must be a genuinely empty cell
+
+    const sourceRowObj = board[sourceRow];
+    const source = sourceRowObj.cells[sourceCol];
+    const top = topOf(source.stack);
     if (!top) return;
+    if (sourceRow === targetRow && sourceCol === targetCol) return;
 
     pushHistory();
-    shelf[targetIndex].push(shelf[sourceIndex].pop());
-
-    moves += 1;
-    resolveTriples();
-    checkWin();
-  }
-
-  // Same empty-cell-only rule, just sourced from a belt slot instead of
-  // another shelf stack. The claimed slot never refills — that belt
-  // just has one less item cycling round from then on.
-  function attemptMoveFromBelt(beltIndex, slotIndex, targetIndex) {
-    if (shelf[targetIndex].length > 0) return;
-    const slot = belts[beltIndex].items[slotIndex];
-    if (!slot || !slot.item) return;
-
-    pushHistory();
-    shelf[targetIndex].push(slot.item);
-    slot.item = null;
-    if (slot.itemEl) { slot.itemEl.remove(); slot.itemEl = null; }
+    source.stack.pop();
+    target.stack.push(top);
+    if (sourceRowObj.moving && source.itemEl) {
+      source.itemEl.remove();
+      source.itemEl = null;
+    }
 
     moves += 1;
     resolveTriples();
@@ -613,20 +624,20 @@
     let clearedAny = true;
     while (clearedAny) {
       clearedAny = false;
-      for (let rowStart = 0; rowStart < shelf.length && !clearedAny; rowStart += COLS) {
-        const rowEnd = Math.min(rowStart + COLS, shelf.length);
-        for (let i = rowStart; i <= rowEnd - 3; i++) {
-          const a = topOf(shelf[i]), b = topOf(shelf[i + 1]), c = topOf(shelf[i + 2]);
+      for (const row of board) {
+        if (row.moving) continue;
+        for (let i = 0; i <= COLS - 3; i++) {
+          const a = topOf(row.cells[i].stack), b = topOf(row.cells[i + 1].stack), c = topOf(row.cells[i + 2].stack);
           if (a && b && c && a.type === b.type && c.type === b.type) {
             // Grab the slot rects before rendering wipes this frame's DOM, so
             // the clear pop appears exactly where the trio was sitting.
-            const rects = [i, i + 1, i + 2].map((idx) => {
-              const slotEl = shelfEl.children[idx];
+            const rects = [i, i + 1, i + 2].map((col) => {
+              const slotEl = row.rowEl.children[col];
               return slotEl ? slotEl.getBoundingClientRect() : null;
             });
-            shelf[i].pop();
-            shelf[i + 1].pop();
-            shelf[i + 2].pop();
+            row.cells[i].stack.pop();
+            row.cells[i + 1].stack.pop();
+            row.cells[i + 2].stack.pop();
             clearedAny = true;
             stars += 1;
             save(KEYS.stars, stars);
@@ -636,6 +647,7 @@
             break;
           }
         }
+        if (clearedAny) break;
       }
     }
   }
@@ -644,36 +656,31 @@
     if (undos <= 0 || history.length === 0) return;
     const oldRects = captureRects();
     const prev = history.pop();
-    shelf = prev.shelf;
-    moves = prev.moves;
-    restoreBelts(prev.belts);
-    undos -= 1;
-    save(KEYS.undos, undos);
-    render();
-    applyFlip(oldRects);
-  }
 
-  // Restores which belt slots hold an item. A revived slot gets a fresh
-  // DOM element appended into its slot's (still-moving) wrapper; the
-  // animation loop then just carries it along from wherever the belt's
-  // offset is now (a small visual jump is an acceptable trade for not
-  // tracking exact continuous-time positions in undo history).
-  function restoreBelts(snapshot) {
-    if (!snapshot) return;
-    belts.forEach((belt, i) => {
-      belt.items.forEach((slot, k) => {
-        const wasItem = snapshot[i][k];
-        if (wasItem && !slot.item) {
-          slot.item = wasItem;
-          slot.itemEl = makeBeltItemEl(wasItem, i, k);
-          slot.slotEl.appendChild(slot.itemEl);
-        } else if (!wasItem && slot.item) {
-          if (slot.itemEl) slot.itemEl.remove();
-          slot.item = null;
-          slot.itemEl = null;
+    prev.rows.forEach((rowSnapshot, r) => {
+      const row = board[r];
+      rowSnapshot.forEach((stackSnapshot, c) => {
+        const cell = row.cells[c];
+        cell.stack = stackSnapshot;
+        if (!row.moving) return;
+        // Moving-row DOM is persistent, so sync it by hand rather than
+        // through the usual full static-row rebuild.
+        const top = topOf(cell.stack);
+        if (top && !cell.itemEl) {
+          cell.itemEl = makeItemEl(top, r, c, cell.stack.length, true);
+          cell.slotEl.appendChild(cell.itemEl);
+        } else if (!top && cell.itemEl) {
+          cell.itemEl.remove();
+          cell.itemEl = null;
         }
       });
     });
+
+    moves = prev.moves;
+    undos -= 1;
+    save(KEYS.undos, undos);
+    renderStaticRows();
+    applyFlip(oldRects);
   }
 
   function toggleHammer() {
@@ -683,9 +690,8 @@
   }
 
   function checkWin() {
-    const shelfDone = shelf.every((stack) => stack.length === 0);
-    const beltsDone = belts.every((belt) => belt.items.every((slot) => !slot.item));
-    if (shelfDone && beltsDone) {
+    const allClear = board.every((row) => row.cells.every((cell) => cell.stack.length === 0));
+    if (allClear) {
       hammers += 1;
       undos += 1;
       save(KEYS.hammers, hammers);
