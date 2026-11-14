@@ -91,13 +91,50 @@
     </div>
   </section>
 
+  <section id="mathView" class="view hidden">
+    <header class="topbar">
+      <span class="levelPill">Lv. <span id="mdLevel">1</span></span>
+      <span class="title">Math Drop</span>
+      <button id="mdRestart" class="iconBtn" aria-label="Restart">↻</button>
+    </header>
+
+    <div class="statsBar">
+      <span class="statPill">✅ <span id="mdScore">0</span></span>
+      <span class="statPill" id="mdLives">❤️❤️❤️</span>
+      <span class="statPill">🏆 <span id="mdBest">0</span></span>
+    </div>
+
+    <div id="mdField" class="mdField">
+      <div class="mdGround" aria-hidden="true"></div>
+      <div id="mdToast" class="mdToast"></div>
+    </div>
+
+    <div id="mdAnswer" class="mdAnswer" aria-live="polite">&nbsp;</div>
+
+    <div id="mdPad" class="mdPad">
+      <button data-k="1">1</button><button data-k="2">2</button><button data-k="3">3</button>
+      <button data-k="4">4</button><button data-k="5">5</button><button data-k="6">6</button>
+      <button data-k="7">7</button><button data-k="8">8</button><button data-k="9">9</button>
+      <button data-k="back" aria-label="Delete">⌫</button><button data-k="0">0</button><button data-k="ok" class="mdOk">OK</button>
+    </div>
+
+    <div id="mdOverlay" class="overlay">
+      <div class="overlay-card">
+        <p id="mdOverlayMsg">Solve each equation before it hits the ground!</p>
+        <button id="mdOverlayBtn">Start</button>
+      </div>
+    </div>
+  </section>
+
   <nav class="tabBar" aria-label="Games">
     <button class="tabBtn active" data-tab="sortView">🛒 Sort</button>
-    <button class="tabBtn" data-tab="codeView">🔐 Code Breaker</button>
+    <button class="tabBtn" data-tab="codeView">🔐 Code</button>
+    <button class="tabBtn" data-tab="mathView">➗ Math</button>
   </nav>
 </div>
 <script src="script.js"></script>
 <script src="codebreaker.js"></script>
+<script src="mathdrop.js"></script>
 <script src="tabs.js"></script>
 </body>
 </html>
