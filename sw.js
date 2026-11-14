@@ -1,9 +1,11 @@
-const CACHE_NAME = 'gbs-cache-v1';
+const CACHE_NAME = 'gbs-cache-v2';
 const CORE_ASSETS = [
   './',
   './index.html',
   './style.css',
   './script.js',
+  './codebreaker.js',
+  './tabs.js',
   './manifest.webmanifest',
   './icons/icon-192.png',
   './icons/icon-512.png',

@@ -19,40 +19,85 @@
 <div class="ambient-glow" aria-hidden="true"></div>
 <div id="fxLayer" aria-hidden="true"></div>
 <div id="app">
-  <header class="topbar">
-    <span class="levelPill">Lv. <span id="levelNumber">1</span></span>
-    <span class="title">Game Before Sleep</span>
-    <button id="restartBtn" class="iconBtn" aria-label="Restart">↻</button>
-  </header>
+  <section id="sortView" class="view">
+    <header class="topbar">
+      <span class="levelPill">Lv. <span id="levelNumber">1</span></span>
+      <span class="title">Game Before Sleep</span>
+      <button id="restartBtn" class="iconBtn" aria-label="Restart">↻</button>
+    </header>
 
-  <div class="statsBar">
-    <span class="statPill">⭐ <span id="starsNumber">0</span></span>
-    <span class="statPill">👣 <span id="movesNumber">0</span> moves</span>
-  </div>
-
-  <main class="board">
-    <div class="boardSection">
-      <span class="sectionLabel">Aisle Shelf</span>
-      <section id="shelf" class="shelf"></section>
+    <div class="statsBar">
+      <span class="statPill">⭐ <span id="starsNumber">0</span></span>
+      <span class="statPill">👣 <span id="movesNumber">0</span> moves</span>
     </div>
-  </main>
 
-  <div class="powerBar">
-    <button id="hammerBtn" class="powerBtn" aria-label="Hammer: clear a matching triple">
-      <span class="power-icon">🔨</span><span class="power-count" id="hammerCount">2</span>
-    </button>
-    <button id="undoBtn" class="powerBtn" aria-label="Undo last move">
-      <span class="power-icon">↩️</span><span class="power-count" id="undoCount">2</span>
-    </button>
-  </div>
+    <main class="board">
+      <div class="boardSection">
+        <span class="sectionLabel">Aisle Shelf</span>
+        <section id="shelf" class="shelf"></section>
+      </div>
+    </main>
 
-  <div id="winOverlay" class="overlay hidden">
-    <div class="overlay-card">
-      <p id="winMessage">All sorted ✨</p>
-      <button id="nextLevelBtn">Next level</button>
+    <div class="powerBar">
+      <button id="hammerBtn" class="powerBtn" aria-label="Hammer: clear a matching triple">
+        <span class="power-icon">🔨</span><span class="power-count" id="hammerCount">2</span>
+      </button>
+      <button id="undoBtn" class="powerBtn" aria-label="Undo last move">
+        <span class="power-icon">↩️</span><span class="power-count" id="undoCount">2</span>
+      </button>
     </div>
-  </div>
+
+    <div id="winOverlay" class="overlay hidden">
+      <div class="overlay-card">
+        <p id="winMessage">All sorted ✨</p>
+        <button id="nextLevelBtn">Next level</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="codeView" class="view hidden">
+    <header class="topbar">
+      <span class="levelPill">Lv. <span id="cbLevel">1</span></span>
+      <span class="title">Code Breaker</span>
+      <button id="cbRestart" class="iconBtn" aria-label="New code">↻</button>
+    </header>
+
+    <div class="statsBar">
+      <span class="statPill">⭐ <span id="cbStars">0</span></span>
+      <span class="statPill">🎯 <span id="cbTries">0</span> tries left</span>
+    </div>
+
+    <p id="cbMessage" class="cbMessage"></p>
+
+    <main class="cbBoard">
+      <div id="cbRows" class="cbRows"></div>
+    </main>
+
+    <div id="cbPalette" class="cbPalette"></div>
+
+    <div class="powerBar">
+      <button id="cbHintBtn" class="powerBtn" aria-label="Hint: reveal one position">
+        <span class="power-icon">💡</span><span class="power-count" id="cbHintCount">2</span>
+      </button>
+      <button id="cbBackBtn" class="powerBtn" aria-label="Remove last pick">⌫</button>
+      <button id="cbSubmitBtn" class="powerBtn cbSubmit">Check</button>
+    </div>
+
+    <div id="cbOverlay" class="overlay hidden">
+      <div class="overlay-card">
+        <p id="cbOverlayMsg"></p>
+        <button id="cbOverlayBtn">Next level</button>
+      </div>
+    </div>
+  </section>
+
+  <nav class="tabBar" aria-label="Games">
+    <button class="tabBtn active" data-tab="sortView">🛒 Sort</button>
+    <button class="tabBtn" data-tab="codeView">🔐 Code Breaker</button>
+  </nav>
 </div>
 <script src="script.js"></script>
+<script src="codebreaker.js"></script>
+<script src="tabs.js"></script>
 </body>
 </html>
